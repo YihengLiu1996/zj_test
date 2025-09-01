@@ -1,18 +1,10 @@
 import os
 import json
-import asyncio
-import random
-import csv
-import base64
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
-from concurrent.futures import ThreadPoolExecutor
-import collections
-import copy
+import re
 import markdown
 from bs4 import BeautifulSoup
-import re
 
 # 设置页面配置
 st.set_page_config(
@@ -23,147 +15,177 @@ st.set_page_config(
 )
 
 # 添加自定义CSS样式
-def local_css(file_name):
-    if os.path.exists(file_name):
-        with open(file_name) as f:
-            st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
-    else:
-        # 如果CSS文件不存在，创建默认样式
-        default_css = """
-        /* 默认样式 */
-        .chat-container {
-            max-width: 1000px;
-            margin: 0 auto;
-            padding: 20px;
-        }
-        
-        .message {
-            margin-bottom: 15px;
-            padding: 12px;
-            border-radius: 10px;
-            max-width: 80%;
-            line-height: 1.5;
-        }
-        
-        .user-message {
-            background-color: #e6f7ff;
-            border-left: 4px solid #1890ff;
-            margin-left: auto;
-        }
-        
-        .assistant-message {
-            background-color: #f0f0f0;
-            border-left: 4px solid #52c41a;
-            margin-right: auto;
-        }
-        
-        .message-content {
-            line-height: 1.6;
-            font-size: 15px;
-        }
-        
-        .message-content h1, .message-content h2, .message-content h3 {
-            color: #1890ff;
-            border-bottom: 1px solid #eee;
-            padding-bottom: 5px;
-        }
-        
-        .message-content pre {
-            background-color: #f6f8fa;
-            padding: 10px;
-            border-radius: 4px;
-            overflow-x: auto;
-        }
-        
-        .message-content code {
-            background-color: #f6f8fa;
-            padding: 2px 4px;
-            border-radius: 4px;
-            font-family: monospace;
-        }
-        
-        .stButton>button {
-            transition: all 0.3s;
-            width: 100%;
-        }
-        
-        .stButton>button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
-        }
-        
-        .navigation-container {
-            display: flex;
-            justify-content: space-between;
-            margin-top: 20px;
-            padding: 10px;
-            background-color: #f5f5f5;
-            border-radius: 8px;
-        }
-        
-        .original-text {
-            background-color: #fff9e6;
-            padding: 15px;
-            border-radius: 8px;
-            margin-top: 20px;
-            border-left: 4px solid #faad14;
-        }
-        
-        .progress-container {
-            margin-top: 10px;
-        }
-        
-        .sample-counter {
-            font-size: 16px;
-            font-weight: bold;
-            color: #1890ff;
-            text-align: center;
-            margin: 10px 0;
-        }
-        
-        .action-buttons {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 10px;
-            margin-top: 20px;
-        }
-        
-        .delete-warning {
-            color: #ff4d4f;
-            font-weight: bold;
-        }
-        """
-        st.markdown(f"<style>{default_css}</style>", unsafe_allow_html=True)
+def local_css():
+    default_css = """
+    /* 默认样式 */
+    .chat-container {
+        max-width: 1000px;
+        margin: 0 auto;
+        padding: 20px;
+    }
+    
+    .message {
+        margin-bottom: 15px;
+        padding: 12px;
+        border-radius: 10px;
+        max-width: 80%;
+        line-height: 1.5;
+    }
+    
+    .user-message {
+        background-color: #e6f7ff;
+        border-left: 4px solid #1890ff;
+        margin-left: auto;
+    }
+    
+    .assistant-message {
+        background-color: #f0f0f0;
+        border-left: 4px solid #52c41a;
+        margin-right: auto;
+    }
+    
+    .message-content {
+        line-height: 1.6;
+        font-size: 15px;
+    }
+    
+    .message-content h1, .message-content h2, .message-content h3 {
+        color: #1890ff;
+        border-bottom: 1px solid #eee;
+        padding-bottom: 5px;
+    }
+    
+    .message-content pre {
+        background-color: #f6f8fa;
+        padding: 10px;
+        border-radius: 4px;
+        overflow-x: auto;
+    }
+    
+    .message-content code {
+        background-color: #f6f8fa;
+        padding: 2px 4px;
+        border-radius: 4px;
+        font-family: monospace;
+    }
+    
+    .stButton>button {
+        transition: all 0.3s;
+        width: 100%;
+    }
+    
+    .stButton>button:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+    
+    .navigation-container {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 20px;
+        padding: 10px;
+        background-color: #f5f5f5;
+        border-radius: 8px;
+    }
+    
+    .original-text {
+        background-color: #fff9e6;
+        padding: 15px;
+        border-radius: 8px;
+        margin-top: 20px;
+        border-left: 4px solid #faad14;
+    }
+    
+    .progress-container {
+        margin-top: 10px;
+    }
+    
+    .sample-counter {
+        font-size: 16px;
+        font-weight: bold;
+        color: #1890ff;
+        text-align: center;
+        margin: 10px 0;
+    }
+    
+    .action-buttons {
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 10px;
+        margin-top: 20px;
+    }
+    
+    .delete-warning {
+        color: #ff4d4f;
+        font-weight: bold;
+    }
+    
+    .upload-info {
+        background-color: #f0f7ff;
+        padding: 10px;
+        border-radius: 5px;
+        margin: 10px 0;
+    }
+    """
+    st.markdown(f"<style>{default_css}</style>", unsafe_allow_html=True)
 
-local_css("style.css")
+local_css()
 
-def parse_jsonl(file):
-    """解析JSONL文件"""
+def parse_jsonl(uploaded_file):
+    """解析JSONL文件 - 修复了文件读取问题"""
     dataset = []
-    for line in file:
-        try:
-            # 处理可能的空行
-            if line.strip() == b"":
-                continue
-            data = json.loads(line)
-            # 只保留user和assistant消息，忽略system
-            messages = [
-                msg for msg in data.get("messages", [])
-                if msg.get("role") in ["user", "assistant"]
-            ]
-            # 保留text字段（如果存在）
-            text = data.get("text", None)
-            dataset.append({
-                "messages": messages,
-                "text": text,
-                "original": data  # 保留原始数据用于导出
-            })
-        except Exception as e:
-            st.error(f"解析行时出错: {str(e)}")
-    return dataset
+    try:
+        # Streamlit的FileUploader返回的文件对象需要这样处理
+        file_contents = uploaded_file.getvalue().decode("utf-8").splitlines()
+        
+        st.write(f"文件包含 {len(file_contents)} 行")  # 调试信息
+        
+        valid_count = 0
+        for i, line in enumerate(file_contents):
+            try:
+                # 跳过空行
+                if not line.strip():
+                    continue
+                    
+                data = json.loads(line)
+                st.write(f"解析第 {i+1} 行成功")  # 调试信息
+                
+                # 只保留user和assistant消息，忽略system
+                messages = [
+                    msg for msg in data.get("messages", [])
+                    if msg.get("role") in ["user", "assistant"]
+                ]
+                
+                # 检查是否有有效消息
+                if not messages:
+                    st.warning(f"第 {i+1} 行: 没有有效的user/assistant消息")
+                    continue
+                    
+                # 保留text字段（如果存在）
+                text = data.get("text", None)
+                dataset.append({
+                    "messages": messages,
+                    "text": text,
+                    "original": data  # 保留原始数据用于导出
+                })
+                valid_count += 1
+            except json.JSONDecodeError as e:
+                st.error(f"第 {i+1} 行JSON解析错误: {str(e)}")
+            except Exception as e:
+                st.error(f"处理第 {i+1} 行时出错: {str(e)}")
+        
+        st.success(f"成功加载 {valid_count} 条有效样本 (共 {len(file_contents)} 行)")
+        return dataset
+        
+    except Exception as e:
+        st.error(f"文件处理错误: {str(e)}")
+        return []
 
 def render_markdown(content):
     """渲染Markdown内容，支持LaTeX"""
+    if not content:
+        return ""
+    
     # 处理LaTeX公式
     content = re.sub(r'\$(.*?)\$', r'\\(\1\\)', content)
     content = re.sub(r'\$\$(.*?)\$\$', r'\\[\1\\]', content)
@@ -171,17 +193,13 @@ def render_markdown(content):
     # 转换Markdown为HTML
     html = markdown.markdown(content, extensions=['extra', 'nl2br', 'sane_lists'])
     
-    # 添加MathJax支持
-    mathjax_script = """
-    <script type="text/javascript" async
-      src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.7/MathJax.js?config=TeX-MML-AM_CHTML">
-    </script>
-    """
-    
-    return f"{html}{mathjax_script}"
+    return html
 
 def display_message(role, content):
     """显示单条消息"""
+    if not content:
+        return
+        
     if role == "user":
         st.markdown(f"""
         <div class="message user-message">
@@ -215,19 +233,28 @@ def main():
         st.header("数据集管理")
         
         # 文件上传
+        st.markdown('<div class="upload-info">支持的JSONL格式示例:<br>'
+                   '{"messages": [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "你好！"}]}</div>', 
+                   unsafe_allow_html=True)
+        
         uploaded_file = st.file_uploader("上传JSONL文件", type=["jsonl"])
         if uploaded_file is not None:
-            # 读取文件
-            file_contents = uploaded_file.getvalue().splitlines()
-            dataset = parse_jsonl(file_contents)
+            st.info(f"已选择文件: {uploaded_file.name}")
             
-            if dataset:
-                st.session_state.dataset = dataset
-                st.session_state.current_index = 0
-                st.session_state.show_original = False
-                st.success(f"成功加载 {len(dataset)} 条样本")
-            else:
-                st.warning("文件解析后没有有效数据")
+            # 添加处理按钮，避免自动处理大文件
+            if st.button("处理文件", type="primary"):
+                with st.spinner("正在解析文件..."):
+                    # 读取文件
+                    dataset = parse_jsonl(uploaded_file)
+                    
+                    if dataset:
+                        st.session_state.dataset = dataset
+                        st.session_state.current_index = 0
+                        st.session_state.show_original = False
+                        st.success(f"成功加载 {len(dataset)} 条有效样本")
+                        st.experimental_rerun()  # 确保界面刷新
+                    else:
+                        st.warning("文件解析后没有有效数据")
         
         # 数据集信息
         if st.session_state.dataset is not None:
@@ -293,7 +320,7 @@ def main():
         
         # 查看原文按钮
         if current_sample["text"] is not None:
-            if st.button("查看原文", key="toggle_original"):
+            if st.button("📄 查看原文", key="toggle_original"):
                 st.session_state.show_original = not st.session_state.show_original
             
             if st.session_state.show_original:
@@ -304,7 +331,7 @@ def main():
                     </div>
                     """, unsafe_allow_html=True)
         else:
-            st.caption("暂无原文内容")
+            st.caption("🔍 暂无原文内容")
         
         # 操作区域
         st.markdown("<div class='action-buttons'>", unsafe_allow_html=True)
@@ -314,13 +341,13 @@ def main():
             if st.button("⇦ 上一条", disabled=(st.session_state.current_index == 0)):
                 st.session_state.current_index -= 1
                 st.session_state.show_original = False
-                st.rerun()
+                st.experimental_rerun()
         
         with col2:
             if st.button("下一条 ⇨", disabled=(st.session_state.current_index == len(st.session_state.dataset) - 1)):
                 st.session_state.current_index += 1
                 st.session_state.show_original = False
-                st.rerun()
+                st.experimental_rerun()
         
         with col3:
             if st.button("🗑️ 删除当前样本"):
@@ -332,7 +359,7 @@ def main():
                     st.session_state.current_index = max(0, len(st.session_state.dataset) - 1)
                 
                 st.session_state.show_original = False
-                st.rerun()
+                st.experimental_rerun()
         
         with col4:
             # 显示删除警告（如果数据集即将为空）
@@ -346,7 +373,7 @@ def main():
         
         # 删除确认提示
         if len(st.session_state.dataset) == 1:
-            st.warning("删除当前样本将清空整个数据集")
+            st.warning("⚠️ 删除当前样本将清空整个数据集")
 
 if __name__ == "__main__":
     main()
