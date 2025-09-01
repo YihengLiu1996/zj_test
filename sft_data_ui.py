@@ -1,7 +1,5 @@
 import streamlit as st
 import json
-import tempfile
-import os
 import re
 from io import StringIO
 import time
@@ -20,6 +18,8 @@ if 'uploaded_file_name' not in st.session_state:
     st.session_state.uploaded_file_name = None
 if 'show_original' not in st.session_state:
     st.session_state.show_original = False
+if 'file_processed' not in st.session_state:
+    st.session_state.file_processed = False
 
 # 自定义CSS样式
 st.markdown("""
@@ -67,31 +67,16 @@ st.markdown("""
 # 处理JSONL文件
 def process_jsonl_file(file_obj):
     data = []
+    line_count = 0
+    
+    # 创建进度条和状态文本
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        # 获取文件大小
-        file_obj.seek(0, 2)  # 移动到文件末尾
-        file_size = file_obj.tell()
-        file_obj.seek(0)  # 回到文件开头
-        
         # 逐行读取文件
-        bytes_read = 0
-        line_count = 0
-        
-        while True:
-            line = file_obj.readline()
-            if not line:
-                break
-                
-            bytes_read += len(line)
+        for line in file_obj:
             line_count += 1
-            
-            # 更新进度
-            progress = bytes_read / file_size
-            progress_bar.progress(progress)
-            status_text.text(f"已处理 {line_count} 行，已读取 {bytes_read/(1024*1024):.2f} MB / {file_size/(1024*1024):.2f} MB")
             
             try:
                 # 解码并解析JSON
@@ -101,13 +86,24 @@ def process_jsonl_file(file_obj):
             except (json.JSONDecodeError, UnicodeDecodeError) as e:
                 st.error(f"第 {line_count} 行解析错误: {e}")
                 continue
+            
+            # 每处理100行更新一次进度
+            if line_count % 100 == 0:
+                progress_bar.progress(min(line_count / 1000, 1.0))
+                status_text.text(f"已处理 {line_count} 行...")
         
-        progress_bar.empty()
-        status_text.empty()
+        progress_bar.progress(1.0)
+        status_text.text(f"完成! 共处理 {line_count} 行")
+        time.sleep(0.5)  # 短暂显示完成状态
+        
         return data
     except Exception as e:
         st.error(f"处理文件时发生错误: {e}")
         return []
+    finally:
+        # 清除进度条和状态文本
+        progress_bar.empty()
+        status_text.empty()
 
 # 渲染消息内容
 def render_message(content):
@@ -151,111 +147,121 @@ st.title("JSONL对话查看器")
 # 文件上传区域
 uploaded_file = st.file_uploader("上传JSONL文件", type=["jsonl"])
 
-if uploaded_file is not None:
-    # 检查是否是新上传的文件
-    if st.session_state.uploaded_file_name != uploaded_file.name:
-        st.session_state.uploaded_file_name = uploaded_file.name
-        st.session_state.show_original = False
-        
-        with st.spinner("正在处理文件，请稍候..."):
-            data = process_jsonl_file(uploaded_file)
-            if data:
-                st.session_state.data = data
-                st.session_state.current_index = 0
-                st.session_state.deleted_indices = set()
-                st.success(f"成功处理 {len(data)} 条记录")
-            else:
-                st.error("未能处理文件或文件为空")
+# 处理文件上传
+if uploaded_file is not None and not st.session_state.file_processed:
+    st.session_state.uploaded_file_name = uploaded_file.name
+    st.session_state.show_original = False
     
-    # 显示当前样本信息
-    if st.session_state.data:
-        total_samples = len(st.session_state.data)
-        current_index = st.session_state.current_index
-        
-        col1, col2, col3, col4 = st.columns([2, 2, 2, 2])
-        with col1:
-            st.write(f"总样本数: {total_samples - len(st.session_state.deleted_indices)}")
-        with col2:
-            st.write(f"当前样本: {current_index + 1} / {total_samples}")
-        
-        # 导航按钮
-        col_nav1, col_nav2, col_nav3, col_nav4 = st.columns([1, 1, 1, 1])
-        with col_nav1:
-            if st.button("⏮️ 第一条", use_container_width=True):
-                st.session_state.current_index = 0
-                st.session_state.show_original = False
-                st.rerun()
-        with col_nav2:
-            if st.button("◀️ 上一条", use_container_width=True) and current_index > 0:
-                st.session_state.current_index -= 1
-                st.session_state.show_original = False
-                st.rerun()
-        with col_nav3:
-            if st.button("下一条 ▶️", use_container_width=True) and current_index < total_samples - 1:
-                st.session_state.current_index += 1
-                st.session_state.show_original = False
-                st.rerun()
-        with col_nav4:
-            if st.button("⏭️ 最后一条", use_container_width=True):
-                st.session_state.current_index = total_samples - 1
-                st.session_state.show_original = False
-                st.rerun()
-        
-        # 操作按钮
-        col_act1, col_act2, col_act3 = st.columns([1, 1, 1])
-        with col_act1:
-            delete_clicked = st.button("🗑️ 删除当前样本", use_container_width=True)
-        with col_act2:
-            if st.button("📄 查看原文", use_container_width=True):
-                st.session_state.show_original = not st.session_state.show_original
-                st.rerun()
-        with col_act3:
-            # 下载按钮
-            filtered_data = [item for i, item in enumerate(st.session_state.data) 
-                            if i not in st.session_state.deleted_indices]
-            download_bytes = download_data(filtered_data)
-            st.download_button(
-                label="💾 下载数据集",
-                data=download_bytes,
-                file_name="processed_dataset.jsonl",
-                mime="application/json",
-                use_container_width=True
-            )
-        
-        # 处理删除操作
-        if delete_clicked:
-            st.session_state.deleted_indices.add(current_index)
-            # 如果删除的是最后一个样本，调整当前索引
-            if current_index >= total_samples - len(st.session_state.deleted_indices):
-                st.session_state.current_index = max(0, current_index - 1)
-            st.success(f"已删除样本 {current_index + 1}")
-            time.sleep(0.5)  # 短暂延迟让用户看到成功消息
+    with st.spinner("正在处理文件，请稍候..."):
+        data = process_jsonl_file(uploaded_file)
+        if data:
+            st.session_state.data = data
+            st.session_state.current_index = 0
+            st.session_state.deleted_indices = set()
+            st.session_state.file_processed = True
+            st.success(f"成功处理 {len(data)} 条记录")
+            st.rerun()  # 强制重新运行以更新UI
+        else:
+            st.error("未能处理文件或文件为空")
+
+# 显示数据内容
+if st.session_state.file_processed and st.session_state.data:
+    total_samples = len(st.session_state.data)
+    current_index = st.session_state.current_index
+    
+    # 显示样本信息
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write(f"总样本数: {total_samples - len(st.session_state.deleted_indices)}")
+    with col2:
+        st.write(f"当前样本: {current_index + 1} / {total_samples}")
+    
+    # 导航按钮
+    col_nav1, col_nav2, col_nav3, col_nav4 = st.columns(4)
+    with col_nav1:
+        if st.button("⏮️ 第一条", use_container_width=True):
+            st.session_state.current_index = 0
+            st.session_state.show_original = False
             st.rerun()
+    with col_nav2:
+        if st.button("◀️ 上一条", use_container_width=True) and current_index > 0:
+            st.session_state.current_index -= 1
+            st.session_state.show_original = False
+            st.rerun()
+    with col_nav3:
+        if st.button("下一条 ▶️", use_container_width=True) and current_index < total_samples - 1:
+            st.session_state.current_index += 1
+            st.session_state.show_original = False
+            st.rerun()
+    with col_nav4:
+        if st.button("⏭️ 最后一条", use_container_width=True):
+            st.session_state.current_index = total_samples - 1
+            st.session_state.show_original = False
+            st.rerun()
+    
+    # 操作按钮
+    col_act1, col_act2, col_act3 = st.columns(3)
+    with col_act1:
+        delete_clicked = st.button("🗑️ 删除当前样本", use_container_width=True)
+    with col_act2:
+        if st.button("📄 查看原文", use_container_width=True):
+            st.session_state.show_original = not st.session_state.show_original
+            st.rerun()
+    with col_act3:
+        # 下载按钮
+        filtered_data = [item for i, item in enumerate(st.session_state.data) 
+                        if i not in st.session_state.deleted_indices]
+        download_bytes = download_data(filtered_data)
+        st.download_button(
+            label="💾 下载数据集",
+            data=download_bytes,
+            file_name="processed_dataset.jsonl",
+            mime="application/json",
+            use_container_width=True
+        )
+    
+    # 处理删除操作
+    if delete_clicked:
+        st.session_state.deleted_indices.add(current_index)
+        # 如果删除的是最后一个样本，调整当前索引
+        if current_index >= total_samples - len(st.session_state.deleted_indices):
+            st.session_state.current_index = max(0, current_index - 1)
+        st.success(f"已删除样本 {current_index + 1}")
+        time.sleep(0.5)  # 短暂延迟让用户看到成功消息
+        st.rerun()
+    
+    # 获取当前样本
+    if 0 <= current_index < len(st.session_state.data):
+        current_sample = st.session_state.data[current_index]
         
-        # 获取当前样本
-        if 0 <= current_index < len(st.session_state.data):
-            current_sample = st.session_state.data[current_index]
-            
-            # 显示对话
-            st.subheader("对话内容")
-            messages = current_sample.get("messages", [])
-            # 过滤掉system消息
-            filtered_messages = [msg for msg in messages if msg.get("role") in ["user", "assistant"]]
-            display_conversation(filtered_messages)
-            
-            # 显示原文（如果有）
-            if st.session_state.show_original:
-                original_text = current_sample.get("text", None)
-                st.subheader("原文内容")
-                if original_text:
-                    st.markdown('<div class="original-text">', unsafe_allow_html=True)
-                    st.text(original_text)
-                    st.markdown('</div>', unsafe_allow_html=True)
-                else:
-                    st.info("暂无原文")
-    else:
-        st.warning("没有有效数据可显示")
-else:
+        # 显示对话
+        st.subheader("对话内容")
+        messages = current_sample.get("messages", [])
+        # 过滤掉system消息
+        filtered_messages = [msg for msg in messages if msg.get("role") in ["user", "assistant"]]
+        display_conversation(filtered_messages)
+        
+        # 显示原文（如果有）
+        if st.session_state.show_original:
+            original_text = current_sample.get("text", None)
+            st.subheader("原文内容")
+            if original_text:
+                st.markdown('<div class="original-text">', unsafe_allow_html=True)
+                st.text(original_text)
+                st.markdown('</div>', unsafe_allow_html=True)
+            else:
+                st.info("暂无原文")
+
+# 重置按钮 - 允许重新上传文件
+if st.session_state.file_processed:
+    if st.button("🔄 重新上传文件"):
+        st.session_state.file_processed = False
+        st.session_state.data = []
+        st.session_state.uploaded_file_name = None
+        st.rerun()
+
+# 初始状态或没有数据时的显示
+if not st.session_state.file_processed:
     st.info("请上传JSONL文件开始使用")
     st.markdown("""
     ### 使用说明
