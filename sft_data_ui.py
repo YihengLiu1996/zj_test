@@ -126,19 +126,24 @@ def local_css():
         border-radius: 5px;
         margin: 10px 0;
     }
+    
+    .loading-indicator {
+        text-align: center;
+        padding: 20px;
+        font-size: 18px;
+        color: #1890ff;
+    }
     """
     st.markdown(f"<style>{default_css}</style>", unsafe_allow_html=True)
 
 local_css()
 
 def parse_jsonl(uploaded_file):
-    """解析JSONL文件 - 修复了文件读取问题"""
+    """解析JSONL文件"""
     dataset = []
     try:
-        # Streamlit的FileUploader返回的文件对象需要这样处理
+        # 正确处理Streamlit上传的文件
         file_contents = uploaded_file.getvalue().decode("utf-8").splitlines()
-        
-        st.write(f"文件包含 {len(file_contents)} 行")  # 调试信息
         
         valid_count = 0
         for i, line in enumerate(file_contents):
@@ -148,7 +153,6 @@ def parse_jsonl(uploaded_file):
                     continue
                     
                 data = json.loads(line)
-                st.write(f"解析第 {i+1} 行成功")  # 调试信息
                 
                 # 只保留user和assistant消息，忽略system
                 messages = [
@@ -158,7 +162,6 @@ def parse_jsonl(uploaded_file):
                 
                 # 检查是否有有效消息
                 if not messages:
-                    st.warning(f"第 {i+1} 行: 没有有效的user/assistant消息")
                     continue
                     
                 # 保留text字段（如果存在）
@@ -169,12 +172,11 @@ def parse_jsonl(uploaded_file):
                     "original": data  # 保留原始数据用于导出
                 })
                 valid_count += 1
-            except json.JSONDecodeError as e:
-                st.error(f"第 {i+1} 行JSON解析错误: {str(e)}")
-            except Exception as e:
-                st.error(f"处理第 {i+1} 行时出错: {str(e)}")
+            except json.JSONDecodeError:
+                continue
+            except Exception:
+                continue
         
-        st.success(f"成功加载 {valid_count} 条有效样本 (共 {len(file_contents)} 行)")
         return dataset
         
     except Exception as e:
@@ -223,6 +225,7 @@ def main():
         st.session_state.dataset = None
         st.session_state.current_index = 0
         st.session_state.show_original = False
+        st.session_state.file_processed = False  # 新增标志避免无限循环
     
     # 页面标题
     st.title("📄 数据集查看与编辑器")
@@ -238,10 +241,11 @@ def main():
                    unsafe_allow_html=True)
         
         uploaded_file = st.file_uploader("上传JSONL文件", type=["jsonl"])
-        if uploaded_file is not None:
+        
+        # 仅当有新文件上传且尚未处理时显示处理按钮
+        if uploaded_file is not None and not st.session_state.file_processed:
             st.info(f"已选择文件: {uploaded_file.name}")
             
-            # 添加处理按钮，避免自动处理大文件
             if st.button("处理文件", type="primary"):
                 with st.spinner("正在解析文件..."):
                     # 读取文件
@@ -251,8 +255,8 @@ def main():
                         st.session_state.dataset = dataset
                         st.session_state.current_index = 0
                         st.session_state.show_original = False
+                        st.session_state.file_processed = True  # 标记文件已处理
                         st.success(f"成功加载 {len(dataset)} 条有效样本")
-                        st.experimental_rerun()  # 确保界面刷新
                     else:
                         st.warning("文件解析后没有有效数据")
         
@@ -282,6 +286,14 @@ def main():
                     file_name="modified_dataset.jsonl",
                     mime="application/json"
                 )
+            
+            # 添加重置按钮
+            if st.button("重新上传文件"):
+                st.session_state.dataset = None
+                st.session_state.current_index = 0
+                st.session_state.show_original = False
+                st.session_state.file_processed = False
+                st.experimental_rerun()
     
     # 主内容区域
     if st.session_state.dataset is None:
@@ -341,13 +353,11 @@ def main():
             if st.button("⇦ 上一条", disabled=(st.session_state.current_index == 0)):
                 st.session_state.current_index -= 1
                 st.session_state.show_original = False
-                st.experimental_rerun()
         
         with col2:
             if st.button("下一条 ⇨", disabled=(st.session_state.current_index == len(st.session_state.dataset) - 1)):
                 st.session_state.current_index += 1
                 st.session_state.show_original = False
-                st.experimental_rerun()
         
         with col3:
             if st.button("🗑️ 删除当前样本"):
@@ -359,7 +369,6 @@ def main():
                     st.session_state.current_index = max(0, len(st.session_state.dataset) - 1)
                 
                 st.session_state.show_original = False
-                st.experimental_rerun()
         
         with col4:
             # 显示删除警告（如果数据集即将为空）
