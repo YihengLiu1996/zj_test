@@ -25,7 +25,8 @@ def parse_jsonl(file):
             # 确保messages字段存在且是列表
             if "messages" in item and isinstance(item["messages"], list):
                 data.append(item)
-        except:
+        except Exception as e:
+            st.error(f"解析错误: {str(e)} - 跳过该行")
             continue
     return data
 
@@ -38,7 +39,14 @@ def render_message(role, content):
         with st.chat_message("assistant", avatar="🤖"):
             st.markdown(content)
             # 特别处理LaTeX公式
-            st.latex(re.sub(r'\\\(', '$', re.sub(r'\\\)', '$', content)))
+            # 先尝试渲染原生LaTeX，如果失败则尝试转换格式
+            try:
+                st.latex(content)
+            except:
+                # 转换 \(...\) 和 \[...\] 为 $...$ 和 $$...$$
+                latex_content = re.sub(r'\\\(', '$', re.sub(r'\\\)', '$', content))
+                latex_content = re.sub(r'\\\[\s*', '$$', re.sub(r'\s*\\\]', '$$', latex_content))
+                st.markdown(latex_content)
 
 def display_conversation():
     """显示当前对话"""
@@ -53,7 +61,9 @@ def display_conversation():
     filtered_messages = [m for m in messages if m["role"] in ["user", "assistant"]]
     
     if not filtered_messages:
-        st.info("当前样本中没有用户或助手消息")
+        st.info("当前样本中没有用户或助手消息（可能只有system消息）")
+        with st.expander("查看原始messages内容"):
+            st.json(messages)
         return
     
     # 显示对话
@@ -97,8 +107,10 @@ if uploaded_file:
     total_items = len(st.session_state.data)
     
     if total_items == 0:
-        st.error("文件中没有有效的对话数据")
+        st.error("文件中没有有效的对话数据，请检查文件格式")
     else:
+        st.success(f"成功加载 {total_items} 条对话数据")
+        
         # 显示导航控件
         col1, col2, col3, col4 = st.columns([1, 2, 1, 1])
         
@@ -203,6 +215,11 @@ st.markdown("""
     }
     .stTextInput>div>div>input {
         font-family: monospace;
+    }
+    .st-expander {
+        border: 1px solid #e0e0e0;
+        border-radius: 5px;
+        padding: 5px;
     }
 </style>
 """, unsafe_allow_html=True)
