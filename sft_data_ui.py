@@ -1,8 +1,10 @@
 import streamlit as st
 import json
-import pandas as pd
-from io import StringIO
+import tempfile
+import os
 import re
+from io import StringIO
+import time
 
 # 页面设置
 st.set_page_config(page_title="JSONL对话查看器", layout="wide")
@@ -14,6 +16,10 @@ if 'current_index' not in st.session_state:
     st.session_state.current_index = 0
 if 'deleted_indices' not in st.session_state:
     st.session_state.deleted_indices = set()
+if 'uploaded_file_name' not in st.session_state:
+    st.session_state.uploaded_file_name = None
+if 'show_original' not in st.session_state:
+    st.session_state.show_original = False
 
 # 自定义CSS样式
 st.markdown("""
@@ -50,22 +56,64 @@ st.markdown("""
     .stButton button {
         width: 100%;
     }
+    .progress-text {
+        font-size: 14px;
+        color: #666;
+        margin-top: 10px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# 文件上传和处理
-def process_uploaded_file(uploaded_file):
+# 处理JSONL文件
+def process_jsonl_file(file_obj):
     data = []
-    for line in uploaded_file:
-        try:
-            data.append(json.loads(line.decode('utf-8')))
-        except json.JSONDecodeError:
-            st.error("文件包含无效的JSON行，请上传有效的JSONL文件")
-            return []
-    return data
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    try:
+        # 获取文件大小
+        file_obj.seek(0, 2)  # 移动到文件末尾
+        file_size = file_obj.tell()
+        file_obj.seek(0)  # 回到文件开头
+        
+        # 逐行读取文件
+        bytes_read = 0
+        line_count = 0
+        
+        while True:
+            line = file_obj.readline()
+            if not line:
+                break
+                
+            bytes_read += len(line)
+            line_count += 1
+            
+            # 更新进度
+            progress = bytes_read / file_size
+            progress_bar.progress(progress)
+            status_text.text(f"已处理 {line_count} 行，已读取 {bytes_read/(1024*1024):.2f} MB / {file_size/(1024*1024):.2f} MB")
+            
+            try:
+                # 解码并解析JSON
+                line_str = line.decode('utf-8').strip()
+                if line_str:  # 确保不是空行
+                    data.append(json.loads(line_str))
+            except (json.JSONDecodeError, UnicodeDecodeError) as e:
+                st.error(f"第 {line_count} 行解析错误: {e}")
+                continue
+        
+        progress_bar.empty()
+        status_text.empty()
+        return data
+    except Exception as e:
+        st.error(f"处理文件时发生错误: {e}")
+        return []
 
 # 渲染消息内容
 def render_message(content):
+    if not content:
+        return
+        
     # 处理LaTeX公式：将$...$转换为LaTeX格式
     content = re.sub(r'\$\$(.*?)\$\$', r'$$\1$$', content)
     content = re.sub(r'\$(.*?)\$', r'$\1$', content)
@@ -73,6 +121,10 @@ def render_message(content):
 
 # 显示对话
 def display_conversation(messages):
+    if not messages:
+        st.info("此样本没有对话内容")
+        return
+        
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content", "")
@@ -100,16 +152,23 @@ st.title("JSONL对话查看器")
 uploaded_file = st.file_uploader("上传JSONL文件", type=["jsonl"])
 
 if uploaded_file is not None:
-    if st.session_state.get('uploaded_file_name') != uploaded_file.name:
-        st.session_state.data = process_uploaded_file(uploaded_file)
-        st.session_state.current_index = 0
-        st.session_state.deleted_indices = set()
+    # 检查是否是新上传的文件
+    if st.session_state.uploaded_file_name != uploaded_file.name:
         st.session_state.uploaded_file_name = uploaded_file.name
+        st.session_state.show_original = False
+        
+        with st.spinner("正在处理文件，请稍候..."):
+            data = process_jsonl_file(uploaded_file)
+            if data:
+                st.session_state.data = data
+                st.session_state.current_index = 0
+                st.session_state.deleted_indices = set()
+                st.success(f"成功处理 {len(data)} 条记录")
+            else:
+                st.error("未能处理文件或文件为空")
     
-    if not st.session_state.data:
-        st.error("无法处理上传的文件，请确保它是有效的JSONL格式")
-    else:
-        # 显示当前样本信息
+    # 显示当前样本信息
+    if st.session_state.data:
         total_samples = len(st.session_state.data)
         current_index = st.session_state.current_index
         
@@ -124,18 +183,22 @@ if uploaded_file is not None:
         with col_nav1:
             if st.button("⏮️ 第一条", use_container_width=True):
                 st.session_state.current_index = 0
+                st.session_state.show_original = False
                 st.rerun()
         with col_nav2:
             if st.button("◀️ 上一条", use_container_width=True) and current_index > 0:
                 st.session_state.current_index -= 1
+                st.session_state.show_original = False
                 st.rerun()
         with col_nav3:
             if st.button("下一条 ▶️", use_container_width=True) and current_index < total_samples - 1:
                 st.session_state.current_index += 1
+                st.session_state.show_original = False
                 st.rerun()
         with col_nav4:
             if st.button("⏭️ 最后一条", use_container_width=True):
                 st.session_state.current_index = total_samples - 1
+                st.session_state.show_original = False
                 st.rerun()
         
         # 操作按钮
@@ -143,7 +206,9 @@ if uploaded_file is not None:
         with col_act1:
             delete_clicked = st.button("🗑️ 删除当前样本", use_container_width=True)
         with col_act2:
-            show_original = st.button("📄 查看原文", use_container_width=True)
+            if st.button("📄 查看原文", use_container_width=True):
+                st.session_state.show_original = not st.session_state.show_original
+                st.rerun()
         with col_act3:
             # 下载按钮
             filtered_data = [item for i, item in enumerate(st.session_state.data) 
@@ -164,10 +229,11 @@ if uploaded_file is not None:
             if current_index >= total_samples - len(st.session_state.deleted_indices):
                 st.session_state.current_index = max(0, current_index - 1)
             st.success(f"已删除样本 {current_index + 1}")
+            time.sleep(0.5)  # 短暂延迟让用户看到成功消息
             st.rerun()
         
         # 获取当前样本
-        if current_index < len(st.session_state.data):
+        if 0 <= current_index < len(st.session_state.data):
             current_sample = st.session_state.data[current_index]
             
             # 显示对话
@@ -178,7 +244,7 @@ if uploaded_file is not None:
             display_conversation(filtered_messages)
             
             # 显示原文（如果有）
-            if show_original:
+            if st.session_state.show_original:
                 original_text = current_sample.get("text", None)
                 st.subheader("原文内容")
                 if original_text:
@@ -187,6 +253,8 @@ if uploaded_file is not None:
                     st.markdown('</div>', unsafe_allow_html=True)
                 else:
                     st.info("暂无原文")
+    else:
+        st.warning("没有有效数据可显示")
 else:
     st.info("请上传JSONL文件开始使用")
     st.markdown("""
@@ -197,6 +265,12 @@ else:
     4. 可选：JSON对象可以包含"text"字段存储原文
     5. 使用导航按钮浏览不同样本
     6. 可以删除不需要的样本，然后下载处理后的数据集
+    
+    ### 示例JSONL格式：
+    ```
+    {"messages": [{"role": "system", "content": "你是个有用无害的助手"}, {"role": "user", "content": "告诉我明天的天气"}, {"role": "assistant", "content": "明天天气晴朗"}]}
+    {"messages": [{"role": "user", "content": "什么是勾股定理？"}, {"role": "assistant", "content": "勾股定理是$a^2 + b^2 = c^2$"}]}
+    ```
     """)
 
 # 页脚
