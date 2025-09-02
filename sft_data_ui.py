@@ -130,41 +130,6 @@ def local_css(file_name):
             background-color: #fff2f0;
             border: 1px solid #ffccc7;
         }
-        
-        /* 思考过程样式 */
-        .thinking-box {
-            background-color: #f5f5f5;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            border-left: 4px solid #8c8c8c;
-        }
-        
-        .thinking-label {
-            font-weight: bold;
-            color: #595959;
-            margin-bottom: 5px;
-            font-size: 14px;
-        }
-        
-        .answer-box {
-            background-color: #f6ffed;
-            padding: 12px;
-            border-radius: 8px;
-            border-left: 4px solid #52c41a;
-        }
-        
-        .answer-label {
-            font-weight: bold;
-            color: #389e0d;
-            margin-bottom: 5px;
-            font-size: 14px;
-        }
-        
-        .thinking-content, .answer-content {
-            line-height: 1.6;
-            font-size: 15px;
-        }
         """
         st.markdown(f"<style>{default_css}</style>", unsafe_allow_html=True)
 
@@ -242,58 +207,27 @@ def render_message(role, msg):
         # 检查是否有content字段
         if 'content' in msg and msg['content']:
             # 有content字段，直接显示
-            html = f"""
-            <div class="message-container {container_class}">
-                <div class="message-box {message_class}">
-                    <div class="message-header">
-                        <div class="avatar">{avatar_emoji}</div>
-                        <div class="message-role">{role_display}</div>
-                    </div>
-                    <div class="message-content">
-                        {markdown_to_html(msg['content'])}
-                    </div>
-                </div>
-            </div>
-            """
-            st.markdown(html, unsafe_allow_html=True)
+            content = msg['content']
         else:
-            # 没有content字段，显示think和answer
-            thinking_html = ""
-            if 'think' in msg and msg['think']:
-                thinking_html = f"""
-                <div class="thinking-box">
-                    <div class="thinking-label">🤔 思考过程</div>
-                    <div class="thinking-content">
-                        {markdown_to_html(msg.get('think', ''))}
-                    </div>
+            # 没有content字段，拼接think和answer
+            think_part = f"# 思考过程\n{msg.get('think', '')}\n\n" if 'think' in msg and msg['think'] else ""
+            answer_part = f"# 最终答案\n{msg.get('answer', '')}" if 'answer' in msg and msg['answer'] else ""
+            content = think_part + answer_part
+        
+        html = f"""
+        <div class="message-container {container_class}">
+            <div class="message-box {message_class}">
+                <div class="message-header">
+                    <div class="avatar">{avatar_emoji}</div>
+                    <div class="message-role">{role_display}</div>
                 </div>
-                """
-            
-            answer_html = ""
-            if 'answer' in msg and msg['answer']:
-                answer_html = f"""
-                <div class="answer-box">
-                    <div class="answer-label">💡 最终答案</div>
-                    <div class="answer-content">
-                        {markdown_to_html(msg.get('answer', ''))}
-                    </div>
-                </div>
-                """
-            
-            # 将思考过程和答案放在同一个消息框内
-            html = f"""
-            <div class="message-container {container_class}">
-                <div class="message-box {message_class}">
-                    <div class="message-header">
-                        <div class="avatar">{avatar_emoji}</div>
-                        <div class="message-role">{role_display}</div>
-                    </div>
-                    {thinking_html}
-                    {answer_html}
+                <div class="message-content">
+                    {markdown_to_html(content)}
                 </div>
             </div>
-            """
-            st.markdown(html, unsafe_allow_html=True)
+        </div>
+        """
+        st.markdown(html, unsafe_allow_html=True)
 
 def get_filtered_data():
     """获取过滤后的数据（排除已删除的项）"""
@@ -457,7 +391,8 @@ def main():
     if st.session_state.show_original:
         st.subheader("📄 原文内容")
         if "text" in current_item:
-            st.text_area("原文", current_item["text"], height=200, key="original_text")
+            # 增大文本框高度到400
+            st.text_area("原文", current_item["text"], height=400, key="original_text")
         else:
             st.info("当前样本中没有'text'字段")
 
