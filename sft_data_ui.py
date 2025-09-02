@@ -22,8 +22,8 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# JSONL文件路径
-JSONL_PATH = "dataset.jsonl"  # 请修改为您的JSONL文件路径
+# 默认JSONL文件路径
+DEFAULT_JSONL_PATH = "dataset.jsonl"
 
 # 添加自定义CSS样式
 def local_css(file_name):
@@ -129,6 +129,20 @@ def local_css(file_name):
             opacity: 0.6;
             background-color: #fff2f0;
             border: 1px solid #ffccc7;
+        }
+        
+        .path-input {
+            margin-bottom: 15px;
+        }
+        
+        .format-example {
+            background-color: #f6f8fa;
+            padding: 10px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            margin-bottom: 10px;
         }
         """
         st.markdown(f"<style>{default_css}</style>", unsafe_allow_html=True)
@@ -266,7 +280,7 @@ def get_next_index(current_index, direction):
 def main():
     # 初始化session state
     if "jsonl_data" not in st.session_state:
-        st.session_state.jsonl_data = load_jsonl_data(JSONL_PATH)
+        st.session_state.jsonl_data = []
     
     if "current_index" not in st.session_state:
         st.session_state.current_index = 0
@@ -276,37 +290,83 @@ def main():
     
     if "deleted_indices" not in st.session_state:
         st.session_state.deleted_indices = set()
+    
+    if "current_file_path" not in st.session_state:
+        st.session_state.current_file_path = DEFAULT_JSONL_PATH
 
     # 页面标题
     st.title("📊 JSONL数据集查看器")
     
-    # 检查数据是否为空
-    if not st.session_state.jsonl_data:
-        st.warning("没有找到数据或JSONL文件为空")
-        return
-    
-    # 获取过滤后的数据
-    filtered_data = get_filtered_data()
-    
-    # 如果没有有效数据，显示提示
-    if not filtered_data:
-        st.warning("所有样本已被删除，请重置或导入新数据")
-        if st.button("重置数据"):
-            st.session_state.deleted_indices = set()
-            st.session_state.current_index = 0
-            st.rerun()
-        return
-    
-    # 确保当前索引有效（未被删除）
-    if st.session_state.current_index in st.session_state.deleted_indices:
-        st.session_state.current_index = get_next_index(st.session_state.current_index, "next")
-    
-    # 获取当前数据项
-    current_item = st.session_state.jsonl_data[st.session_state.current_index]
-    
     # 侧边栏
     with st.sidebar:
+        st.header("数据集配置")
+        
+        # 数据集路径输入
+        st.markdown('<div class="path-input">', unsafe_allow_html=True)
+        new_file_path = st.text_input(
+            "数据集路径", 
+            value=st.session_state.current_file_path,
+            placeholder="请输入JSONL文件的完整路径",
+            help="输入JSONL文件的完整路径，然后点击'加载数据集'按钮"
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # 加载数据集按钮
+        if st.button("📂 加载数据集", use_container_width=True):
+            if os.path.exists(new_file_path):
+                st.session_state.current_file_path = new_file_path
+                st.session_state.jsonl_data = load_jsonl_data(new_file_path)
+                st.session_state.current_index = 0
+                st.session_state.deleted_indices = set()
+                st.session_state.show_original = False
+                st.success(f"已加载数据集: {new_file_path}")
+                st.rerun()
+            else:
+                st.error(f"文件不存在: {new_file_path}")
+        
+        # 数据格式说明
+        with st.expander("📋 数据格式说明", expanded=False):
+            st.write("""
+            支持两种格式的JSONL文件：
+            
+            1. **标准格式** - 包含content字段：
+            """)
+            
+            st.markdown("""
+            <div class="format-example">
+{"messages": [{"role": "user", "content": "你好，请介绍下你自己"}, {"role": "assistant", "content": "我是AI助手，很高兴为您服务。"}], "text": "用户问候并请求介绍"}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.write("""
+            2. **思考过程格式** - 包含think和answer字段：
+            """)
+            
+            st.markdown("""
+            <div class="format-example">
+{"messages": [{"role": "user", "content": "解释一下量子计算"}, {"role": "assistant", "think": "用户询问量子计算，我需要先解释基本概念，然后说明原理和应用", "answer": "量子计算是一种利用量子力学原理进行计算的技术..."}], "text": "用户询问量子计算解释"}
+            </div>
+            """, unsafe_allow_html=True)
+            
+            st.write("""
+            **字段说明**：
+            - `messages`: 对话消息列表（必需）
+            - `role`: 角色，支持"user"和"assistant"
+            - `content`: 消息内容（标准格式）
+            - `think`: 思考过程（思考过程格式）
+            - `answer`: 最终答案（思考过程格式）
+            - `text`: 原文内容（可选）
+            """)
+        
         st.header("导航控制")
+        
+        # 检查数据是否为空
+        if not st.session_state.jsonl_data:
+            st.info("请先加载数据集")
+            return
+        
+        # 获取过滤后的数据
+        filtered_data = get_filtered_data()
         
         # 显示统计信息
         total_items = len(st.session_state.jsonl_data)
@@ -315,50 +375,54 @@ def main():
         
         # 获取当前在剩余项中的位置
         valid_indices = [i for i in range(total_items) if i not in st.session_state.deleted_indices]
-        current_pos = valid_indices.index(st.session_state.current_index) + 1 if st.session_state.current_index in valid_indices else 1
+        if st.session_state.current_index in valid_indices:
+            current_pos = valid_indices.index(st.session_state.current_index) + 1
+        else:
+            current_pos = 1 if valid_indices else 0
         
         st.markdown(f"""
         <div class="stats-box">
+            <p><strong>当前文件:</strong> {os.path.basename(st.session_state.current_file_path)}</p>
             <p><strong>总样本数:</strong> {total_items}</p>
             <p><strong>剩余样本数:</strong> {remaining_items}</p>
             <p><strong>已删除样本:</strong> {deleted_items}</p>
-            <p><strong>当前样本:</strong> {current_pos}/{remaining_items}</p>
+            <p><strong>当前样本:</strong> {current_pos}/{remaining_items if remaining_items > 0 else 0}</p>
         </div>
         """, unsafe_allow_html=True)
         
         # 导航按钮
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("⏪ 上一条", use_container_width=True):
+            if st.button("⏪ 上一条", use_container_width=True, disabled=remaining_items == 0):
                 st.session_state.current_index = get_next_index(st.session_state.current_index, "previous")
                 st.session_state.show_original = False
                 st.rerun()
         
         with col2:
-            if st.button("⏩ 下一条", use_container_width=True):
+            if st.button("⏩ 下一条", use_container_width=True, disabled=remaining_items == 0):
                 st.session_state.current_index = get_next_index(st.session_state.current_index, "next")
                 st.session_state.show_original = False
                 st.rerun()
         
         # 删除当前样本按钮
-        if st.button("🗑️ 删除当前样本", type="primary", use_container_width=True):
+        if st.button("🗑️ 删除当前样本", type="primary", use_container_width=True, disabled=remaining_items == 0):
             st.session_state.deleted_indices.add(st.session_state.current_index)
             # 自动跳到下一条
             st.session_state.current_index = get_next_index(st.session_state.current_index, "next")
             st.rerun()
         
         # 查看原文按钮
-        if st.button("📄 查看原文", use_container_width=True):
+        if st.button("📄 查看原文", use_container_width=True, disabled=remaining_items == 0):
             st.session_state.show_original = not st.session_state.show_original
             st.rerun()
         
         # 重置删除按钮
-        if st.button("🔄 重置删除标记", use_container_width=True):
+        if st.button("🔄 重置删除标记", use_container_width=True, disabled=len(st.session_state.deleted_indices) == 0):
             st.session_state.deleted_indices = set()
             st.rerun()
         
         # 导出数据按钮
-        if st.button("💾 导出数据集", use_container_width=True):
+        if st.button("💾 导出数据集", use_container_width=True, disabled=remaining_items == 0):
             # 保存到临时文件
             temp_file = "filtered_dataset.jsonl"
             save_jsonl_data(temp_file, filtered_data)
@@ -373,8 +437,32 @@ def main():
                     use_container_width=True
                 )
     
+    # 主内容区域
+    # 检查数据是否为空
+    if not st.session_state.jsonl_data:
+        st.info("请先在侧边栏加载数据集")
+        return
+    
+    # 获取过滤后的数据
+    filtered_data = get_filtered_data()
+    
+    # 如果没有有效数据，显示提示
+    if not filtered_data:
+        st.warning("所有样本已被删除，请重置或加载新数据")
+        return
+    
+    # 确保当前索引有效（未被删除）
+    if st.session_state.current_index in st.session_state.deleted_indices:
+        st.session_state.current_index = get_next_index(st.session_state.current_index, "next")
+    
+    # 获取当前数据项
+    current_item = st.session_state.jsonl_data[st.session_state.current_index]
+    
     # 显示当前样本的对话
-    st.subheader(f"📝 对话样本 {current_pos}/{remaining_items}")
+    valid_indices = [i for i in range(len(st.session_state.jsonl_data)) if i not in st.session_state.deleted_indices]
+    current_pos = valid_indices.index(st.session_state.current_index) + 1 if st.session_state.current_index in valid_indices else 1
+    
+    st.subheader(f"📝 对话样本 {current_pos}/{len(filtered_data)}")
     
     if st.session_state.current_index in st.session_state.deleted_indices:
         st.warning("此样本已被标记为删除")
