@@ -1,0 +1,47 @@
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+tokenizer = AutoTokenizer.from_pretrained("sarosavo/Master-RM")
+model = AutoModelForCausalLM.from_pretrained("sarosavo/Master-RM")
+
+PROMPT= '''
+Given a problem, determine whether the final answer in the provided (incomplete) solution process matches the reference answer.  
+The reference answer may be one single option character (e.g., A, B, C, D), a numerical value, an expression, or a list of answers if multiple questions are involved.  
+**The reference answer may be in Chinese or another language, but your evaluation should be language-agnostic.**  
+
+Your task:  
+- Compare the final output of the solution process with the reference answer.  
+- If they **match exactly**, output **YES**.  
+- If they **do not match**, output **NO**.  
+- If the solution process is unclear, incomplete, or ambiguous, assume it is incorrect and output **NO**.  
+
+Your output must be strictly **'YES'** or **'NO'**, with no additional words, punctuation, or explanation.  
+
+---
+
+**Question:**  
+{question}  
+
+**Solution Process (Final Step Only):**  
+{response}  
+
+**Reference Answer:**  
+{reference}  
+
+**Output:**  
+'''
+
+
+question="The founder of China's first public kindergarten teacher training school - Jiangxi Experimental Kindergarten Teacher School is (　　)."
+label="Chen Heqin"
+answer="heqin chen"
+
+prompt_question = PROMPT.format(question=question, reference=label, response=answer)
+messages=[
+           {"role": "system", "content": "You are a helpful assistant."},
+           {"role": "user", "content": prompt_question},
+         ]
+
+input_ids=tokenizer.apply_chat_template(messages,return_tensors="pt")
+output=model.generate(input_ids,do_sample=False)
+judgement=tokenizer.decode(output[0][input_ids.shape[1]:],skip_special_tokens=True)
+print("Model judgement: ",judgement)
