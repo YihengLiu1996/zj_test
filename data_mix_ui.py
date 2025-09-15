@@ -197,58 +197,119 @@ def export_shards(df, output_path, shard_size_gb=1):
 st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
 
-# 加载数据按钮
-if st.sidebar.button("📁 加载数据集"):
-    if not data_path or not os.path.exists(data_path):
-        st.sidebar.error("请提供有效的数据集路径")
+# 添加路径诊断工具
+if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
+    st.sidebar.subheader("路径诊断")
+    abs_path = os.path.abspath(data_path) if data_path else ""
+    st.sidebar.code(f"绝对路径: {abs_path}")
+    
+    if data_path and os.path.exists(data_path):
+        st.sidebar.success("✅ 路径存在")
+        st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
     else:
-        with st.spinner("正在加载数据集..."):
-            # 递归查找所有jsonl文件
-            jsonl_files = glob.glob(os.path.join(data_path, "**/*.jsonl"), recursive=True)
-            st.sidebar.info(f"找到 {len(jsonl_files)} 个JSONL文件")
-            
-            # 逐步加载避免内存溢出
-            all_data = []
-            progress_bar = st.sidebar.progress(0)
-            
-            for i, file in enumerate(jsonl_files):
+        st.sidebar.error("❌ 路径不存在或无效")
+
+# 加载数据按钮
+if st.sidebar.button("📁 加载数据集", type="primary"):
+    if not data_path:
+        st.sidebar.error("❌ 请先输入路径")
+    else:
+        # 关键修复：规范化路径（解决Windows大小写问题）
+        data_path = os.path.normpath(data_path)
+        
+        with st.spinner("🔍 正在扫描数据集文件..."):
+            try:
+                # 修复1：大小写不敏感匹配（解决.JSONL问题）
+                jsonl_files = []
+                for root, _, files in os.walk(data_path):
+                    for file in files:
+                        if file.lower().endswith('.jsonl'):
+                            jsonl_files.append(os.path.join(root, file))
+                
+                st.sidebar.info(f"📁 找到 {len(jsonl_files)} 个JSONL文件")
+                
+                if not jsonl_files:
+                    st.sidebar.warning("⚠️ 未找到JSONL文件，请检查：")
+                    st.sidebar.caption("- 路径是否正确")
+                    st.sidebar.caption("- 文件后缀是否为.jsonl（非.JSONL）")
+                    st.sidebar.caption("- 是否有文件访问权限")
+                    st.stop()
+                
+                # 修复2：添加文件内容预览（诊断格式问题）
+                sample_file = jsonl_files[0]
                 try:
-                    with open(file, 'r', encoding='utf-8') as f:
-                        for line in f:
-                            try:
-                                sample = json.loads(line)
-                                # 验证必要字段
-                                if all(k in sample for k in ['source', 'category', 'domain', 'language', 'token_count', 'text']):
-                                    all_data.append({
-                                        'source': sample['source'],
-                                        'category': sample['category'],
-                                        'domain': sample['domain'],
-                                        'language': sample['language'],
-                                        'token_count': int(sample['token_count']),
-                                        'text': sample['text']
-                                    })
-                            except:
-                                continue
+                    with open(sample_file, 'r', encoding='utf-8') as f:
+                        sample_lines = [next(f).strip() for _ in range(3)]
+                    st.sidebar.caption(f"📄 预览 {os.path.basename(sample_file)}:")
+                    for line in sample_lines:
+                        st.sidebar.caption(f"`{line[:100]}...`")
                 except Exception as e:
-                    st.sidebar.warning(f"跳过文件 {file}: {str(e)}")
+                    st.sidebar.warning(f"⚠️ 无法读取示例文件: {str(e)}")
                 
-                progress_bar.progress((i + 1) / len(jsonl_files))
-            
-            progress_bar.empty()
-            
-            if all_data:
-                # 转为DataFrame
-                df = pd.DataFrame(all_data)
-                total_tokens = df['token_count'].sum()
+                # 修复3：更健壮的JSON解析
+                all_data = []
+                progress_bar = st.sidebar.progress(0)
+                status_text = st.sidebar.empty()
                 
-                # 存储到session state
-                st.session_state.df = df
-                st.session_state.total_tokens = total_tokens
-                st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
+                for i, file in enumerate(jsonl_files):
+                    try:
+                        with open(file, 'r', encoding='utf-8') as f:
+                            valid_count = 0
+                            for line_num, line in enumerate(f):
+                                try:
+                                    sample = json.loads(line)
+                                    # 严格验证字段
+                                    required_fields = ['source', 'category', 'domain', 'language', 'token_count', 'text']
+                                    if all(k in sample for k in required_fields):
+                                        # 确保token_count是数字
+                                        try:
+                                            token_count = int(float(sample['token_count']))
+                                            all_data.append({
+                                                'source': str(sample['source']),
+                                                'category': str(sample['category']),
+                                                'domain': str(sample['domain']),
+                                                'language': str(sample['language']),
+                                                'token_count': token_count,
+                                                'text': str(sample['text'])
+                                            })
+                                            valid_count += 1
+                                        except (ValueError, TypeError):
+                                            st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: token_count非数字")
+                                    else:
+                                        missing = [k for k in required_fields if k not in sample]
+                                        st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: 缺少字段 {missing}")
+                                except json.JSONDecodeError:
+                                    st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: JSON解析失败")
+                        
+                        status_text.text(f"✅ {os.path.basename(file)}: {valid_count} 有效样本")
+                    except Exception as e:
+                        st.sidebar.error(f"❌ 跳过 {os.path.basename(file)}: {str(e)}")
+                    
+                    progress_bar.progress((i + 1) / len(jsonl_files))
                 
-                st.sidebar.success(f"加载完成！共 {len(df):,} 个样本，{total_tokens/1e9:.2f}B tokens")
-            else:
-                st.sidebar.error("未找到有效数据")
+                progress_bar.empty()
+                status_text.empty()
+                
+                if all_data:
+                    # 转为DataFrame
+                    df = pd.DataFrame(all_data)
+                    total_tokens = df['token_count'].sum()
+                    
+                    # 存储到session state
+                    st.session_state.df = df
+                    st.session_state.total_tokens = total_tokens
+                    st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
+                    
+                    st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
+                else:
+                    st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
+                    st.sidebar.info("有效JSONL样本示例:")
+                    st.sidebar.code('''{"source": "CCI4", "category": "book", "domain": "science", "language": "CN", "token_count": 1234, "text": "示例文本..."}''')
+                    st.stop()
+                    
+            except Exception as e:
+                st.sidebar.exception(f"_fatal error_: {str(e)}")
+                st.stop()
 
 # 检查数据是否已加载
 if 'df' in st.session_state:
