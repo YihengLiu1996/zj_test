@@ -461,7 +461,7 @@ if 'df' in st.session_state:
     
     # 5. Token Count 配比图
     with col5:
-        st.subheader("Token长度分布")
+        st.subheader("Token length distribution")
         df['token_bin'] = st.session_state.token_bins
         token_dist = calculate_distribution(df, 'token_bin')
         
@@ -482,21 +482,21 @@ if 'df' in st.session_state:
     
     # 6. 子类分布图
     with col6:
-        st.subheader("子类组合分布 (Top 10)")
+        st.subheader("子类组合分布 (Top 50)")
         # 创建子类组合
         df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
         subclass_dist = calculate_distribution(df, 'subclass')
         
-        # 取Top 10
-        top10 = subclass_dist.head(10)
+        # 取Top 50
+        top50 = subclass_dist.head(50)
         
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.barh(top10.index, top10.values)
+        fig, ax = plt.subplots(figsize=(50, 5))
+        ax.barh(top50.index, top50.values)
         ax.set_xlabel('比例')
-        ax.set_title('Top 10 子类组合分布')
+        ax.set_title('Top 50 distribution of subclass combinations')
         
         # 添加比例标签
-        for i, v in enumerate(top10.values):
+        for i, v in enumerate(top50.values):
             ax.text(v + 0.005, i, f'{v:.1%}', va='center')
         
         plt.tight_layout()
