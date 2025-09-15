@@ -678,8 +678,8 @@ if 'df' in st.session_state:
         if not token_dist.empty:
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.bar(token_dist.index, token_dist.values)
-            ax.set_ylabel('比例')
-            ax.set_title('Token长度分布')
+            ax.set_ylabel('Ratio')
+            ax.set_title('Token length distribution')
             for i, v in enumerate(token_dist.values):
                 ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
             st.pyplot(fig)
@@ -688,22 +688,22 @@ if 'df' in st.session_state:
     
     # 6. 子类分布图
     with col6:
-        st.subheader("子类组合分布 (Top 10)")
+        st.subheader("子类组合分布 (Top 50)")
         # 创建子类组合
         df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
         subclass_dist = calculate_distribution(df, 'subclass')
         
         if not subclass_dist.empty:
-            # 取Top 10
-            top10 = subclass_dist.head(10)
+            # 取Top 50
+            top50 = subclass_dist.head(50)
             
-            fig, ax = plt.subplots(figsize=(10, 5))
-            ax.barh(top10.index, top10.values)
-            ax.set_xlabel('比例')
-            ax.set_title('Top 10 子类组合分布')
+            fig, ax = plt.subplots(figsize=(50, 5))
+            ax.barh(top50.index, top50.values)
+            ax.set_xlabel('Ratio')
+            ax.set_title('Top 50 distribution of subclass combinations')
             
             # 添加比例标签
-            for i, v in enumerate(top10.values):
+            for i, v in enumerate(top50.values):
                 ax.text(v + 0.005, i, f'{v:.1%}', va='center')
             
             plt.tight_layout()
