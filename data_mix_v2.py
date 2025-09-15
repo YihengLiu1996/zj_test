@@ -381,7 +381,7 @@ def load_dataset_parallel(data_path):
                     logger.info(f"已处理 {processed_files}/{len(jsonl_files)} 文件")
         
         # 5. 验证结果
-        if not all_meta
+        if not all_meta:
             return None, "未找到有效数据样本"
         
         # 6. 创建DataFrame
