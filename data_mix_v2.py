@@ -290,68 +290,58 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
 
 # ========== 优化后的数据加载函数 ==========
 def load_dataset_parallel(data_path):
-    """并行加载JSONL数据集，返回元数据和统计信息"""
-    # 确保路径是绝对路径
-    data_path = os.path.abspath(data_path)
-    
-    # 1. 扫描所有JSONL文件（大小写不敏感）
-    jsonl_files = []
-    total_size = 0
-    for root, _, files in os.walk(data_path):
-        for file in files:
-            if file.lower().endswith('.jsonl'):
-                file_path = os.path.abspath(os.path.join(root, file))
-                jsonl_files.append(file_path)
-                total_size += os.path.getsize(file_path)
-    
-    if not jsonl_files:
-        return None, f"未找到JSONL文件，请检查路径: {data_path}"
-    
-    st.sidebar.info(f"📁 扫描到 {len(jsonl_files)} 个文件 | 总大小: {total_size/(1024**3):.1f} GB")
-    
-    # 2. 并行处理文件（使用所有可用CPU核心）
-    all_metadata = []
-    progress_small = st.sidebar.empty()
-    
-    # 自动确定工作进程数（不超过32，避免过度调度）
-    max_workers = min(32, os.cpu_count() or 1)
-    
-    def process_file(file):
-        """处理单个文件并记录精确元数据"""
-        metadata = []
-        try:
-            with open(file, 'rb') as f:  # 必须用二进制模式
-                offset = 0
-                while True:
-                    line = f.readline()
-                    if not line:
-                        break
-                    
-                    try:
-                        # 计算内容哈希（用于后续验证）
-                        line_hash = hashlib.md5(line).hexdigest()
+    """修复后的并行加载函数（带详细诊断）"""
+    try:
+        # 1. 路径规范化
+        data_path = os.path.abspath(data_path)
+        logger.info(f"开始加载数据集: {data_path}")
+        
+        # 2. 扫描文件
+        jsonl_files = []
+        total_size = 0
+        for root, _, files in os.walk(data_path):
+            for file in files:
+                if file.lower().endswith('.jsonl'):
+                    file_path = os.path.join(root, file)
+                    jsonl_files.append(file_path)
+                    total_size += os.path.getsize(file_path)
+        
+        if not jsonl_files:
+            return None, f"未找到JSONL文件，请检查路径: {data_path}"
+        
+        logger.info(f"找到 {len(jsonl_files)} 个文件，总大小: {total_size} bytes")
+        
+        # 3. 并行处理
+        all_metadata = []
+        max_workers = min(32, os.cpu_count() or 1)
+        
+        def process_file(file):
+            """处理单个文件"""
+            metadata = []
+            try:
+                logger.debug(f"开始处理文件: {file}")
+                with open(file, 'rb') as f:
+                    offset = 0
+                    line_count = 0
+                    while True:
+                        line = f.readline()
+                        if not line:
+                            break
                         
-                        # 尝试解析JSON
                         try:
+                            # 计算哈希
+                            line_hash = hashlib.md5(line).hexdigest()
+                            
+                            # 解析JSON
                             data = json.loads(line.decode('utf-8', errors='replace'))
-                        except json.JSONDecodeError:
-                            offset += len(line)
-                            continue
-                        
-                        # 验证必要字段
-                        required_fields = ['source', 'category', 'domain', 'language', 'token_count']
-                        if all(k in data for k in required_fields):
-                            # 确保token_count是数字
-                            try:
+                            
+                            # 验证必要字段
+                            required_fields = ['source', 'category', 'domain', 'language', 'token_count']
+                            if all(k in data for k in required_fields):
                                 token_count = int(float(data['token_count']))
                                 
-                                # 提取ID（如果存在）
-                                sample_id = data.get('id')
-                                if sample_id is not None:
-                                    sample_id = str(sample_id)
-                                
                                 meta = {
-                                    'id': sample_id,  # 保存UUID（如果存在）
+                                    'id': str(data.get('id')) if data.get('id') is not None else None,
                                     'source': str(data['source']),
                                     'category': str(data['category']),
                                     'domain': str(data['domain']),
@@ -362,18 +352,54 @@ def load_dataset_parallel(data_path):
                                     'line_hash': line_hash
                                 }
                                 metadata.append(meta)
-                            except (ValueError, TypeError):
-                                pass
-                    except Exception as e:
-                        logger.debug(f"处理文件 {file} 偏移量 {offset} 时出错: {str(e)}")
-                    
-                    # 更新偏移量
-                    offset += len(line)
-        except Exception as e:
-            logger.exception(f"处理文件 {file} 时出错")
-            return file, str(e), []
+                                line_count += 1
+                        except Exception as e:
+                            logger.debug(f"跳过无效行 {file}:{offset} - {str(e)}")
+                        
+                        offset += len(line)
+                
+                logger.info(f"完成处理 {file}: {line_count} 有效样本")
+                return file, None, metadata
+                
+            except Exception as e:
+                error_msg = f"处理文件 {file} 失败: {str(e)}"
+                logger.error(error_msg)
+                return file, error_msg, []
         
-        return file, None, metadata
+        # 4. 执行并行处理
+        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(process_file, file) for file in jsonl_files]
+            
+            processed_files = 0
+            for future in concurrent.futures.as_completed(futures):
+                file, error, metadata = future.result()
+                if error:
+                    logger.error(f"文件处理失败: {error}")
+                else:
+                    all_metadata.extend(metadata)
+                    processed_files += 1
+                    logger.info(f"已处理 {processed_files}/{len(jsonl_files)} 文件")
+        
+        # 5. 验证结果
+        if not all_meta
+            return None, "未找到有效数据样本"
+        
+        # 6. 创建DataFrame
+        df = pd.DataFrame(all_metadata)
+        total_tokens = df['token_count'].sum()
+        token_bins = [get_token_bin(tc) for tc in df['token_count']]
+        
+        logger.info(f"加载完成: {len(df)} 样本, {total_tokens} tokens")
+        return {
+            'df': df,
+            'total_tokens': total_tokens,
+            'token_bins': token_bins
+        }, None
+        
+    except Exception as e:
+        error_msg = f"加载数据集时发生严重错误: {str(e)}\n{traceback.format_exc()}"
+        logger.error(error_msg)
+        return None, error_msg
     
     # 并行处理
     with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
