@@ -434,29 +434,84 @@ if diagnose:
 else:
     data_path = st.sidebar.text_input("数据集文件夹路径", value=os.getcwd())
 
-# 加载数据按钮
-if st.sidebar.button("📁 加载数据集 (极速模式)", type="primary"):
-    # 确保路径是绝对路径
-    abs_data_path = os.path.abspath(data_path)
-    
-    if not data_path or not os.path.exists(abs_data_path):
-        st.sidebar.error("❌ 请提供有效的绝对路径")
-    else:
-        # 显示内存监控
-        mem_col1, mem_col2 = st.sidebar.columns(2)
-        mem_usage = psutil.virtual_memory().percent
-        mem_col1.metric("内存使用", f"{mem_usage:.1f}%")
-        mem_col2.metric("可用内存", f"{psutil.virtual_memory().available/(1024**3):.1f} GB")
+if st.sidebar.button("📁 加载数据集 (诊断模式)", type="primary"):
+    try:
+        # 1. 路径预处理
+        if not data_path:
+            st.sidebar.error("❌ 错误：路径不能为空")
+            st.stop()
         
-        if mem_usage > 80:
-            st.sidebar.warning("⚠️ 内存使用过高，加载可能失败")
+        # 2. 转换为绝对路径并规范化
+        abs_data_path = os.path.abspath(os.path.expanduser(data_path))
+        st.sidebar.info(f"🔍 规范化路径: {abs_data_path}")
         
+        # 3. 路径存在性检查
+        if not os.path.exists(abs_data_path):
+            st.sidebar.error(f"❌ 错误：路径不存在 - {abs_data_path}")
+            st.stop()
+        
+        # 4. 路径可读性检查
+        if not os.access(abs_data_path, os.R_OK):
+            st.sidebar.error(f"❌ 错误：路径不可读（权限问题）- {abs_data_path}")
+            st.stop()
+        
+        # 5. 显示目录内容（帮助诊断）
+        try:
+            items = os.listdir(abs_data_path)
+            st.sidebar.info(f"📁 目录包含 {len(items)} 个项目")
+            
+            # 显示前5个文件/文件夹
+            st.sidebar.caption("前5个项目:")
+            for i, item in enumerate(items[:5]):
+                item_path = os.path.join(abs_data_path, item)
+                if os.path.isdir(item_path):
+                    st.sidebar.caption(f"  📁 {item}/")
+                else:
+                    st.sidebar.caption(f"  📄 {item} ({os.path.getsize(item_path)} bytes)")
+        except Exception as e:
+            st.sidebar.warning(f"⚠️ 无法列出目录内容: {str(e)}")
+        
+        # 6. 扫描JSONL文件
+        st.sidebar.info("🔍 正在扫描JSONL文件...")
+        jsonl_files = []
+        for root, dirs, files in os.walk(abs_data_path):
+            for file in files:
+                if file.lower().endswith('.jsonl'):
+                    full_path = os.path.join(root, file)
+                    jsonl_files.append(full_path)
+        
+        if not jsonl_files:
+            st.sidebar.error("❌ 错误：未找到任何JSONL文件！")
+            st.sidebar.info("请检查:")
+            st.sidebar.caption("- 文件后缀是否为.jsonl（不是.JSONL或.json）")
+            st.sidebar.caption("- 是否在子文件夹中")
+            st.sidebar.caption("- 文件是否有读取权限")
+            st.stop()
+        
+        st.sidebar.success(f"✅ 找到 {len(jsonl_files)} 个JSONL文件")
+        
+        # 7. 显示前3个文件的预览
+        st.sidebar.subheader("📄 文件预览")
+        for i, file_path in enumerate(jsonl_files[:3]):
+            st.sidebar.caption(f"文件 {i+1}: {os.path.basename(file_path)}")
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    # 读取前3行
+                    for j in range(3):
+                        line = f.readline().strip()
+                        if line:
+                            st.sidebar.caption(f"  行{j+1}: {line[:100]}...")
+            except Exception as e:
+                st.sidebar.warning(f"    无法读取: {str(e)}")
+        
+        # 8. 开始并行加载
         start_time = time.time()
-        with st.spinner("⚡ 正在并行加载数据集（使用所有CPU核心）..."):
+        with st.spinner("⚡ 正在并行加载数据集..."):
             result, error = load_dataset_parallel(abs_data_path)
             
             if error:
-                st.sidebar.error(f"加载失败: {error}")
+                st.sidebar.error(f"❌ 加载失败: {error}")
+                st.exception(Exception(error))  # 强制显示错误
             else:
                 # 存储到session state
                 st.session_state.df = result['df']
@@ -476,6 +531,12 @@ if st.sidebar.button("📁 加载数据集 (极速模式)", type="primary"):
                     unique_ids = result['df']['id'].nunique()
                     total = len(result['df'])
                     st.sidebar.info(f"🔑 唯一ID: {unique_ids:,} / {total:,} ({unique_ids/total:.1%})")
+    
+    except Exception as e:
+        # 捕获所有异常并显示
+        st.sidebar.error(f"❌ 严重错误: {str(e)}")
+        st.exception(e)  # 显示完整错误堆栈
+        logger.exception("加载数据集时发生严重错误")
 
 # 检查数据是否已加载
 if 'df' in st.session_state:
