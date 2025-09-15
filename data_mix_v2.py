@@ -389,7 +389,7 @@ def load_dataset_parallel(data_path):
     
     progress_small.empty()
     
-    if not all_meta
+    if not all_meta:
         return None, "未找到有效数据样本"
     
     # 3. 创建元数据DataFrame
