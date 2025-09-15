@@ -4,27 +4,19 @@ import numpy as np
 import json
 import os
 import glob
-import mmap
-import concurrent.futures
-import time
-import linecache
-import psutil
-import hashlib
-import re
+import matplotlib.pyplot as plt
 from tqdm import tqdm
+import re
+from io import StringIO
+import time
 from scipy.optimize import nnls
-import logging
-import traceback
-
-# 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('data_balancer')
+import concurrent.futures
+from threading import Thread
+import queue
+import mmap
 
 # 配置页面
-st.set_page_config(layout="wide", page_title="数据配比工具", page_icon="📊")
+st.set_page_config(layout="wide", page_title="数据配比工具")
 st.title("📊 数据配比分析与调整工具")
 
 # 全局常量
@@ -50,8 +42,6 @@ def calculate_distribution(df, column, weights=None):
     if weights is None:
         weights = df['token_count']
     total = weights.sum()
-    if total == 0:
-        return pd.Series()
     dist = df.groupby(column).apply(lambda x: np.sum(weights[x.index]) / total)
     return dist.sort_values(ascending=False)
 
@@ -68,10 +58,6 @@ def ipf_solver(df, target_ratios, target_total, max_iter=50, tol=0.01):
     # 初始化权重
     weights = np.ones(len(df))
     total_tokens = df['token_count'].sum()
-    
-    if total_tokens == 0:
-        st.error("错误：数据集中token_count总和为0")
-        return None, None, False
     
     # 检查目标比例可行性
     for dim, targets in target_ratios.items():
@@ -134,8 +120,7 @@ def ipf_solver(df, target_ratios, target_total, max_iter=50, tol=0.01):
         actual_dist[dim] = {}
         for cat in target_ratios[dim].keys():
             mask = (df[dim] == cat)
-            actual_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / target_total
-            actual_dist[dim][cat] = actual_ratio
+            actual_dist[dim][cat] = np.sum(weights[mask] * df.loc[mask, 'token_count']) / target_total
     
     return weights, actual_dist, (max_error < tol)
 
@@ -154,415 +139,341 @@ def sample_dataset(df, weights, target_total):
     if sampled_tokens < target_total * 0.95:  # 低于95%时补充
         additional = target_total - sampled_tokens
         remaining = df[~retained].copy()
-        if not remaining.empty:
-            remaining['prob'] = (additional * remaining['token_count'] / 
-                                remaining['token_count'].sum() / 
-                                remaining['token_count'])
-            retained[~retained] = np.random.random(len(remaining)) < np.minimum(remaining['prob'], 1.0)
+        remaining['prob'] = (additional * remaining['token_count'] / 
+                            remaining['token_count'].sum() / 
+                            remaining['token_count'])
+        retained[~retained] = np.random.random(len(remaining)) < np.minimum(remaining['prob'], 1.0)
     
     return df[retained].copy()
 
-def get_verified_text(file_path, offset, expected_id=None, expected_hash=None):
-    """带验证的文本获取（核心：保证100%准确性）"""
-    try:
-        with open(file_path, 'rb') as f:
-            f.seek(offset)
-            line = f.readline()
-            
-            # 1. 验证物理完整性
-            if expected_hash:
-                actual_hash = hashlib.md5(line).hexdigest()
-                if actual_hash != expected_hash:
-                    logger.error(f"数据篡改检测: {file_path}:{offset} | 期望哈希: {expected_hash} | 实际: {actual_hash}")
-                    return f"[ERROR: DATA CORRUPTED AT {offset}]"
-            
-            # 2. 解析JSON
-            try:
-                data = json.loads(line.decode('utf-8', errors='replace'))
-            except json.JSONDecodeError:
-                logger.error(f"JSON解析失败: {file_path}:{offset}")
-                return f"[ERROR: INVALID JSON AT {offset}]"
-            
-            # 3. 验证逻辑ID（如果提供）
-            if expected_id is not None:
-                actual_id = data.get('id')
-                if actual_id != expected_id:
-                    logger.warning(f"ID不匹配: 期望 {expected_id} 但得到 {actual_id} | {file_path}:{offset}")
-            
-            return data.get('text', "")
-            
-    except Exception as e:
-        logger.exception(f"读取失败 {file_path}:{offset} - {str(e)}")
-        return f"[ERROR: READ FAILED AT {offset}]"
-
-def export_shards_verified(df, output_path, shard_size_gb=1):
-    """带验证的分片导出（保证100%数据准确性）"""
-    # 确保输出路径是绝对路径
-    output_path = os.path.abspath(output_path)
+def export_shards(df, output_path, shard_size_gb=1):
+    """分片导出JSONL文件"""
     os.makedirs(output_path, exist_ok=True)
-    
     shard_size_bytes = shard_size_gb * GB
     current_size = 0
     shard_idx = 1
     buffer = []
     
-    # 创建进度容器
-    progress_container = st.empty()
-    status_text = st.sidebar.empty()
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    # 按文件分组处理（减少文件打开次数）
-    total_samples = len(df)
-    processed = 0
-    
-    for (file_path, offset), group in df.groupby(['file_path', 'offset']):
-        # 转换为绝对路径
-        abs_file_path = os.path.abspath(file_path)
+    for idx, row in df.iterrows():
+        # 计算当前样本字节数
+        sample_bytes = len(row['text'].encode('utf-8')) + 1  # +1 for newline
         
-        for _, row in group.iterrows():
-            # 关键：使用双重验证获取文本
-            text = get_verified_text(
-                abs_file_path,
-                offset,
-                expected_id=row.get('id'),
-                expected_hash=row.get('line_hash')
-            )
-            
-            # 创建样本
-            sample = {
-                'id': row.get('id'),
-                'source': row['source'],
-                'category': row['category'],
-                'domain': row['domain'],
-                'language': row['language'],
-                'token_count': row['token_count'],
-                'text': text
-            }
-            
-            # 序列化为JSONL
-            try:
-                sample_json = json.dumps(sample, ensure_ascii=False) + '\n'
-                sample_bytes = len(sample_json.encode('utf-8'))
-            except Exception as e:
-                logger.error(f"序列化失败: {str(e)} | 样本: {sample}")
-                continue
-            
-            # 检查是否需要新分片
-            if current_size + sample_bytes > shard_size_bytes and buffer:
-                shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
-                try:
-                    with open(shard_path, 'w', encoding='utf-8') as out_f:
-                        out_f.writelines(buffer)
-                except Exception as e:
-                    logger.error(f"写入分片失败 {shard_path}: {str(e)}")
-                    st.sidebar.error(f"写入分片失败: {str(e)}")
-                    return
-                buffer = []
-                current_size = 0
-                shard_idx += 1
-            
-            # 添加到缓冲区
-            buffer.append(sample_json)
-            current_size += sample_bytes
-            
-            # 更新进度（每100样本）
-            processed += 1
-            if processed % 100 == 0:
-                with progress_container.container():
-                    progress = processed / total_samples
-                    st.progress(min(progress, 1.0))
-                    st.caption(f"处理样本 {processed}/{total_samples} | 当前分片: {shard_idx}")
-                status_text.text(f"导出进度: {progress:.1%} | 分片: {shard_idx}")
+        # 如果当前分片已满，写入文件
+        if current_size + sample_bytes > shard_size_bytes and buffer:
+            shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
+            with open(shard_path, 'w', encoding='utf-8') as f:
+                f.write("".join(buffer))
+            buffer = []
+            current_size = 0
+            shard_idx += 1
+        
+        # 添加样本到缓冲区
+        buffer.append(json.dumps({
+            'source': row['source'],
+            'category': row['category'],
+            'domain': row['domain'],
+            'language': row['language'],
+            'token_count': row['token_count'],
+            'text': row['text']
+        }, ensure_ascii=False) + '\n')
+        current_size += sample_bytes
+        
+        # 更新进度
+        if idx % 1000 == 0:
+            progress = (idx + 1) / len(df)
+            progress_bar.progress(min(progress, 1.0))
+            status_text.text(f"处理样本 {idx+1}/{len(df)} | 当前分片: {shard_idx}")
     
     # 写入最后一个分片
     if buffer:
         shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
-        try:
-            with open(shard_path, 'w', encoding='utf-8') as f:
-                f.writelines(buffer)
-        except Exception as e:
-            logger.error(f"写入最终分片失败 {shard_path}: {str(e)}")
-            st.sidebar.error(f"写入最终分片失败: {str(e)}")
-            return
+        with open(shard_path, 'w', encoding='utf-8') as f:
+            f.write("".join(buffer))
     
-    progress_container.empty()
+    progress_bar.empty()
     status_text.empty()
-    st.sidebar.success(f"导出完成！共 {shard_idx} 个分片，路径: {output_path}")
+    st.success(f"导出完成！共 {shard_idx} 个分片，路径: {output_path}")
 
-# ========== 优化后的数据加载函数 ==========
-def load_dataset_parallel(data_path):
-    """修复后的并行加载函数（带详细诊断）"""
+# ========== 优化的文件加载函数 ==========
+def load_file_batched(file, batch_size=1000):
+    """批量加载文件（结合内存映射和批量处理）"""
+    file_data = []
     try:
-        # 1. 路径规范化
-        data_path = os.path.abspath(data_path)
-        logger.info(f"开始加载数据集: {data_path}")
+        file_size = os.path.getsize(file)
         
-        # 2. 扫描文件
-        jsonl_files = []
-        total_size = 0
-        for root, _, files in os.walk(data_path):
-            for file in files:
-                if file.lower().endswith('.jsonl'):
-                    file_path = os.path.join(root, file)
-                    jsonl_files.append(file_path)
-                    total_size += os.path.getsize(file_path)
-        
-        if not jsonl_files:
-            return None, f"未找到JSONL文件，请检查路径: {data_path}"
-        
-        logger.info(f"找到 {len(jsonl_files)} 个文件，总大小: {total_size} bytes")
-        
-        # 3. 并行处理
-        all_metadata = []
-        max_workers = min(32, os.cpu_count() or 1)
-        
-        def process_file(file):
-            """处理单个文件"""
-            metadata = []
-            try:
-                logger.debug(f"开始处理文件: {file}")
-                with open(file, 'rb') as f:
-                    offset = 0
-                    line_count = 0
-                    while True:
-                        line = f.readline()
-                        if not line:
-                            break
-                        
+        # 对于大文件使用内存映射
+        if file_size > 100 * 1024 * 1024:  # >100MB
+            with open(file, 'r', encoding='utf-8') as f:
+                with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as mm:
+                    batch = []
+                    valid_count = 0
+                    
+                    for line in iter(mm.readline, b""):
                         try:
-                            # 计算哈希
-                            line_hash = hashlib.md5(line).hexdigest()
-                            
-                            # 解析JSON
-                            data = json.loads(line.decode('utf-8', errors='replace'))
-                            
-                            # 验证必要字段
-                            required_fields = ['source', 'category', 'domain', 'language', 'token_count']
-                            if all(k in data for k in required_fields):
-                                token_count = int(float(data['token_count']))
-                                
-                                meta = {
-                                    'id': str(data.get('id')) if data.get('id') is not None else None,
-                                    'source': str(data['source']),
-                                    'category': str(data['category']),
-                                    'domain': str(data['domain']),
-                                    'language': str(data['language']),
-                                    'token_count': token_count,
-                                    'file_path': file,
-                                    'offset': offset,
-                                    'line_hash': line_hash
-                                }
-                                metadata.append(meta)
-                                line_count += 1
-                        except Exception as e:
-                            logger.debug(f"跳过无效行 {file}:{offset} - {str(e)}")
+                            sample = json.loads(line.decode('utf-8', errors='replace'))
+                            required_fields = ['source', 'category', 'domain', 'language', 'token_count', 'text']
+                            if all(k in sample for k in required_fields):
+                                try:
+                                    token_count = int(float(sample['token_count']))
+                                    batch.append({
+                                        'source': str(sample['source']),
+                                        'category': str(sample['category']),
+                                        'domain': str(sample['domain']),
+                                        'language': str(sample['language']),
+                                        'token_count': token_count,
+                                        'text': str(sample['text'])
+                                    })
+                                    valid_count += 1
+                                except (ValueError, TypeError):
+                                    pass
+                        except json.JSONDecodeError:
+                            pass
                         
-                        offset += len(line)
+                        # 批量处理
+                        if len(batch) >= batch_size:
+                            file_data.extend(batch)
+                            batch = []
+                    
+                    # 处理剩余批次
+                    if batch:
+                        file_data.extend(batch)
+        else:
+            # 小文件使用普通读取
+            with open(file, 'r', encoding='utf-8') as f:
+                batch = []
+                valid_count = 0
                 
-                logger.info(f"完成处理 {file}: {line_count} 有效样本")
-                return file, None, metadata
+                for line_num, line in enumerate(f):
+                    try:
+                        sample = json.loads(line)
+                        required_fields = ['source', 'category', 'domain', 'language', 'token_count', 'text']
+                        if all(k in sample for k in required_fields):
+                            try:
+                                token_count = int(float(sample['token_count']))
+                                batch.append({
+                                    'source': str(sample['source']),
+                                    'category': str(sample['category']),
+                                    'domain': str(sample['domain']),
+                                    'language': str(sample['language']),
+                                    'token_count': token_count,
+                                    'text': str(sample['text'])
+                                })
+                                valid_count += 1
+                            except (ValueError, TypeError):
+                                pass
+                    except json.JSONDecodeError:
+                        pass
+                    
+                    # 批量处理
+                    if len(batch) >= batch_size:
+                        file_data.extend(batch)
+                        batch = []
                 
-            except Exception as e:
-                error_msg = f"处理文件 {file} 失败: {str(e)}"
-                logger.error(error_msg)
-                return file, error_msg, []
-        
-        # 4. 执行并行处理
-        with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures = [executor.submit(process_file, file) for file in jsonl_files]
-            
-            processed_files = 0
-            for future in concurrent.futures.as_completed(futures):
-                file, error, metadata = future.result()
-                if error:
-                    logger.error(f"文件处理失败: {error}")
-                else:
-                    all_metadata.extend(metadata)
-                    processed_files += 1
-                    logger.info(f"已处理 {processed_files}/{len(jsonl_files)} 文件")
-        
-        # 5. 验证结果
-        if not all_meta:
-            return None, "未找到有效数据样本"
-        
-        # 6. 创建DataFrame
-        df = pd.DataFrame(all_metadata)
-        total_tokens = df['token_count'].sum()
-        token_bins = [get_token_bin(tc) for tc in df['token_count']]
-        
-        logger.info(f"加载完成: {len(df)} 样本, {total_tokens} tokens")
-        return {
-            'df': df,
-            'total_tokens': total_tokens,
-            'token_bins': token_bins
-        }, None
-        
+                # 处理剩余批次
+                if batch:
+                    file_data.extend(batch)
+                    
     except Exception as e:
-        error_msg = f"加载数据集时发生严重错误: {str(e)}\n{traceback.format_exc()}"
-        logger.error(error_msg)
-        return None, error_msg
+        pass  # 静默处理错误，避免影响其他文件
     
-    # 并行处理
-    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_file, file) for file in jsonl_files]
-        
-        for i, future in enumerate(concurrent.futures.as_completed(futures)):
-            file, error, metadata = future.result()
-            if error:
-                st.sidebar.warning(f"⚠️ {os.path.basename(file)}: {error}")
-            else:
-                all_metadata.extend(metadata)
-                progress_small.text(f"✅ 处理 {i+1}/{len(jsonl_files)} | 样本: {len(all_metadata):,}")
-    
-    progress_small.empty()
-    
-    if not all_meta:
-        return None, "未找到有效数据样本"
-    
-    # 3. 创建元数据DataFrame
-    df = pd.DataFrame(all_metadata)
-    total_tokens = df['token_count'].sum()
-    
-    # 4. 计算token分组
-    token_bins = [get_token_bin(tc) for tc in df['token_count']]
-    
-    # 5. 记录关键指标
-    logger.info(f"加载完成: {len(df)} 样本 | {total_tokens/1e9:.2f}B tokens")
-    
-    return {
-        'df': df,
-        'total_tokens': total_tokens,
-        'token_bins': token_bins
-    }, None
+    return file, file_data, len(file_data)
 
 # ========== 左侧配置栏 ==========
 st.sidebar.header("🔧 配置面板")
+data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
 
-# 路径诊断工具
-st.sidebar.subheader("🔍 路径诊断")
-diagnose = st.sidebar.checkbox("启用路径诊断", value=False)
-
-if diagnose:
-    data_path = st.sidebar.text_input("数据集文件夹路径", value=os.getcwd())
+# 添加路径诊断工具
+if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
+    st.sidebar.subheader("路径诊断")
+    abs_path = os.path.abspath(data_path) if data_path else ""
+    st.sidebar.code(f"绝对路径: {abs_path}")
     
-    if data_path:
-        abs_path = os.path.abspath(data_path)
-        st.sidebar.code(f"绝对路径: {abs_path}")
-        
-        if os.path.exists(abs_path):
-            st.sidebar.success("✅ 路径存在")
-            st.sidebar.info(f"包含 {len(os.listdir(abs_path))} 个项目")
-            
-            # 检查是否有JSONL文件
-            has_jsonl = any(f.lower().endswith('.jsonl') for f in os.listdir(abs_path))
-            st.sidebar.info(f"包含JSONL文件: {'是' if has_jsonl else '否'}")
-        else:
-            st.sidebar.error("❌ 路径不存在")
-else:
-    data_path = st.sidebar.text_input("数据集文件夹路径", value=os.getcwd())
+    if data_path and os.path.exists(data_path):
+        st.sidebar.success("✅ 路径存在")
+        items = os.listdir(data_path)
+        st.sidebar.info(f"包含 {len(items)} 个项目")
+        # 显示前5个JSONL文件
+        jsonl_count = sum(1 for item in items if item.lower().endswith('.jsonl'))
+        st.sidebar.info(f"JSONL文件: {jsonl_count} 个")
+    else:
+        st.sidebar.error("❌ 路径不存在或无效")
 
-if st.sidebar.button("📁 加载数据集 (诊断模式)", type="primary"):
-    try:
-        # 1. 路径预处理
-        if not data_path:
-            st.sidebar.error("❌ 错误：路径不能为空")
-            st.stop()
+# 加载数据按钮（优化版本）
+if st.sidebar.button("📁 加载数据集 (多线程+批量优化)", type="primary"):
+    if not data_path:
+        st.sidebar.error("❌ 请先输入路径")
+    else:
+        # 关键修复：规范化路径
+        data_path = os.path.normpath(data_path)
         
-        # 2. 转换为绝对路径并规范化
-        abs_data_path = os.path.abspath(os.path.expanduser(data_path))
-        st.sidebar.info(f"🔍 规范化路径: {abs_data_path}")
-        
-        # 3. 路径存在性检查
-        if not os.path.exists(abs_data_path):
-            st.sidebar.error(f"❌ 错误：路径不存在 - {abs_data_path}")
-            st.stop()
-        
-        # 4. 路径可读性检查
-        if not os.access(abs_data_path, os.R_OK):
-            st.sidebar.error(f"❌ 错误：路径不可读（权限问题）- {abs_data_path}")
-            st.stop()
-        
-        # 5. 显示目录内容（帮助诊断）
-        try:
-            items = os.listdir(abs_data_path)
-            st.sidebar.info(f"📁 目录包含 {len(items)} 个项目")
-            
-            # 显示前5个文件/文件夹
-            st.sidebar.caption("前5个项目:")
-            for i, item in enumerate(items[:5]):
-                item_path = os.path.join(abs_data_path, item)
-                if os.path.isdir(item_path):
-                    st.sidebar.caption(f"  📁 {item}/")
-                else:
-                    st.sidebar.caption(f"  📄 {item} ({os.path.getsize(item_path)} bytes)")
-        except Exception as e:
-            st.sidebar.warning(f"⚠️ 无法列出目录内容: {str(e)}")
-        
-        # 6. 扫描JSONL文件
-        st.sidebar.info("🔍 正在扫描JSONL文件...")
-        jsonl_files = []
-        for root, dirs, files in os.walk(abs_data_path):
-            for file in files:
-                if file.lower().endswith('.jsonl'):
-                    full_path = os.path.join(root, file)
-                    jsonl_files.append(full_path)
-        
-        if not jsonl_files:
-            st.sidebar.error("❌ 错误：未找到任何JSONL文件！")
-            st.sidebar.info("请检查:")
-            st.sidebar.caption("- 文件后缀是否为.jsonl（不是.JSONL或.json）")
-            st.sidebar.caption("- 是否在子文件夹中")
-            st.sidebar.caption("- 文件是否有读取权限")
-            st.stop()
-        
-        st.sidebar.success(f"✅ 找到 {len(jsonl_files)} 个JSONL文件")
-        
-        # 7. 显示前3个文件的预览
-        st.sidebar.subheader("📄 文件预览")
-        for i, file_path in enumerate(jsonl_files[:3]):
-            st.sidebar.caption(f"文件 {i+1}: {os.path.basename(file_path)}")
-            try:
-                with open(file_path, 'r', encoding='utf-8') as f:
-                    # 读取前3行
-                    for j in range(3):
-                        line = f.readline().strip()
-                        if line:
-                            st.sidebar.caption(f"  行{j+1}: {line[:100]}...")
-            except Exception as e:
-                st.sidebar.warning(f"    无法读取: {str(e)}")
-        
-        # 8. 开始并行加载
         start_time = time.time()
-        with st.spinner("⚡ 正在并行加载数据集..."):
-            result, error = load_dataset_parallel(abs_data_path)
-            
-            if error:
-                st.sidebar.error(f"❌ 加载失败: {error}")
-                st.exception(Exception(error))  # 强制显示错误
-            else:
-                # 存储到session state
-                st.session_state.df = result['df']
-                st.session_state.total_tokens = result['total_tokens']
-                st.session_state.token_bins = result['token_bins']
+        with st.spinner("🔍 正在扫描数据集文件..."):
+            try:
+                # 扫描文件
+                jsonl_files = []
+                total_size = 0
+                for root, _, files in os.walk(data_path):
+                    for file in files:
+                        if file.lower().endswith('.jsonl'):
+                            full_path = os.path.join(root, file)
+                            jsonl_files.append(full_path)
+                            total_size += os.path.getsize(full_path)
                 
-                # 计算加载速度
-                elapsed = time.time() - start_time
-                speed = result['total_tokens'] / elapsed / 1e6  # MB tokens/s
+                st.sidebar.info(f"📁 找到 {len(jsonl_files)} 个JSONL文件 | 总大小: {total_size/(1024**3):.1f}GB")
                 
-                st.sidebar.success(f"🎉 加载成功！共 {len(result['df']):,} 个样本")
-                st.sidebar.info(f"⏱️ 耗时: {elapsed:.1f}秒 | 速度: {speed:.1f}M tokens/秒")
-                st.sidebar.info(f"📊 总Token数: {result['total_tokens']/1e9:.2f}B")
+                if not jsonl_files:
+                    st.sidebar.warning("⚠️ 未找到JSONL文件，请检查：")
+                    st.sidebar.caption("- 路径是否正确")
+                    st.sidebar.caption("- 文件后缀是否为.jsonl")
+                    st.stop()
                 
-                # 显示ID统计
-                if 'id' in result['df'] and not pd.isna(result['df']['id']).all():
-                    unique_ids = result['df']['id'].nunique()
-                    total = len(result['df'])
-                    st.sidebar.info(f"🔑 唯一ID: {unique_ids:,} / {total:,} ({unique_ids/total:.1%})")
-    
-    except Exception as e:
-        # 捕获所有异常并显示
-        st.sidebar.error(f"❌ 严重错误: {str(e)}")
-        st.exception(e)  # 显示完整错误堆栈
-        logger.exception("加载数据集时发生严重错误")
+                # 显示文件预览（仅第一个文件）
+                sample_file = jsonl_files[0]
+                try:
+                    with open(sample_file, 'r', encoding='utf-8') as f:
+                        sample_lines = [next(f).strip() for _ in range(3)]
+                    st.sidebar.caption(f"📄 预览 {os.path.basename(sample_file)}:")
+                    for line in sample_lines:
+                        st.sidebar.caption(f"`{line[:100]}...`")
+                except Exception as e:
+                    st.sidebar.warning(f"⚠️ 无法读取示例文件: {str(e)}")
+                
+                # 多线程并行加载（核心优化）
+                all_data = []
+                progress_bar = st.sidebar.progress(0)
+                status_text = st.sidebar.empty()
+                
+                # 动态调整线程数（根据文件数量）
+                max_workers = min(32, max(4, len(jsonl_files)))
+                st.sidebar.info(f"⚡ 使用 {max_workers} 个线程并行加载")
+                
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # 提交所有任务
+                    future_to_file = {executor.submit(load_file_batched, file): file for file in jsonl_files}
+                    
+                    # 收集结果
+                    completed = 0
+                    total_valid_samples = 0
+                    for future in concurrent.futures.as_completed(future_to_file):
+                        file, file_data, valid_count = future.result()
+                        all_data.extend(file_data)
+                        total_valid_samples += valid_count
+                        completed += 1
+                        status_text.text(f"✅ 完成 {completed}/{len(jsonl_files)} 文件 | 有效样本: {total_valid_samples:,}")
+                        progress_bar.progress(completed / len(jsonl_files))
+                
+                progress_bar.empty()
+                status_text.empty()
+                
+                if all_data:
+                    # 转为DataFrame
+                    df = pd.DataFrame(all_data)
+                    total_tokens = df['token_count'].sum()
+                    
+                    # 存储到session state
+                    st.session_state.df = df
+                    st.session_state.total_tokens = total_tokens
+                    st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
+                    
+                    # 计算加载性能
+                    elapsed = time.time() - start_time
+                    speed = len(all_data) / elapsed if elapsed > 0 else 0
+                    
+                    st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
+                    st.sidebar.info(f"⏱️ 耗时: {elapsed:.1f}秒 | 速度: {speed:.0f} 样本/秒")
+                else:
+                    st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
+                    st.sidebar.info("有效JSONL样本示例:")
+                    st.sidebar.code('''{"source": "CCI4", "category": "book", "domain": "science", "language": "CN", "token_count": 1234, "text": "示例文本..."}''')
+                    st.stop()
+                    
+            except Exception as e:
+                st.sidebar.error(f"加载失败: {str(e)}")
+                st.stop()
+
+# 保留原始串行加载作为备选
+if st.sidebar.button("📁 加载数据集 (串行-兼容模式)"):
+    if not data_path:
+        st.sidebar.error("❌ 请先输入路径")
+    else:
+        data_path = os.path.normpath(data_path)
+        
+        with st.spinner("🔍 正在扫描数据集文件..."):
+            try:
+                # 扫描文件
+                jsonl_files = []
+                for root, _, files in os.walk(data_path):
+                    for file in files:
+                        if file.lower().endswith('.jsonl'):
+                            jsonl_files.append(os.path.join(root, file))
+                
+                st.sidebar.info(f"📁 找到 {len(jsonl_files)} 个JSONL文件")
+                
+                if not jsonl_files:
+                    st.sidebar.warning("⚠️ 未找到JSONL文件...")
+                    st.stop()
+                
+                # 原始串行加载逻辑
+                all_data = []
+                progress_bar = st.sidebar.progress(0)
+                status_text = st.sidebar.empty()
+                
+                for i, file in enumerate(jsonl_files):
+                    try:
+                        with open(file, 'r', encoding='utf-8') as f:
+                            valid_count = 0
+                            for line_num, line in enumerate(f):
+                                try:
+                                    sample = json.loads(line)
+                                    required_fields = ['source', 'category', 'domain', 'language', 'token_count', 'text']
+                                    if all(k in sample for k in required_fields):
+                                        try:
+                                            token_count = int(float(sample['token_count']))
+                                            all_data.append({
+                                                'source': str(sample['source']),
+                                                'category': str(sample['category']),
+                                                'domain': str(sample['domain']),
+                                                'language': str(sample['language']),
+                                                'token_count': token_count,
+                                                'text': str(sample['text'])
+                                            })
+                                            valid_count += 1
+                                        except (ValueError, TypeError):
+                                            st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: token_count非数字")
+                                    else:
+                                        missing = [k for k in required_fields if k not in sample]
+                                        st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: 缺少字段 {missing}")
+                                except json.JSONDecodeError:
+                                    st.sidebar.warning(f"⚠️ 文件 {os.path.basename(file)} 第{line_num}行: JSON解析失败")
+                        
+                        status_text.text(f"✅ {os.path.basename(file)}: {valid_count} 有效样本")
+                    except Exception as e:
+                        st.sidebar.error(f"❌ 跳过 {os.path.basename(file)}: {str(e)}")
+                    
+                    progress_bar.progress((i + 1) / len(jsonl_files))
+                
+                progress_bar.empty()
+                status_text.empty()
+                
+                if all_data:
+                    df = pd.DataFrame(all_data)
+                    total_tokens = df['token_count'].sum()
+                    
+                    st.session_state.df = df
+                    st.session_state.total_tokens = total_tokens
+                    st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
+                    
+                    st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
+                else:
+                    st.sidebar.error("❌ 未找到有效数据...")
+                    st.stop()
+                    
+            except Exception as e:
+                st.sidebar.exception(f"_fatal error_: {str(e)}")
+                st.stop()
 
 # 检查数据是否已加载
 if 'df' in st.session_state:
@@ -604,7 +515,7 @@ if 'df' in st.session_state:
         # 为每个类别创建输入框
         target_ratios[dim] = {}
         total_ratio = 0.0
-        cols = st.sidebar.columns(min(3, len(values)))  # 限制每行最多3个
+        cols = st.sidebar.columns(len(values))
         
         for i, val in enumerate(values):
             current_ratio = current_dist.get(val, 0.0)
@@ -615,7 +526,6 @@ if 'df' in st.session_state:
                     max_value=1.0, 
                     value=float(current_ratio),
                     step=0.01,
-                    format="%.4f",
                     key=f"{dim}_{val}"
                 )
                 target_ratios[dim][val] = ratio
@@ -644,11 +554,10 @@ if 'df' in st.session_state:
                 
                 # 显示采样结果
                 st.sidebar.success("配比方案已生成！")
-                actual_tokens = sampled_df['token_count'].sum()
-                st.sidebar.info(f"实际总量: {actual_tokens/1e9:.2f}B tokens ({actual_tokens/target_total:.1%} of target)")
+                st.sidebar.info(f"实际总量: {sampled_df['token_count'].sum()/1e9:.2f}B tokens")
                 
                 # 显示关键维度误差
-                for dim in ['language', 'domain', 'source']:
+                for dim in ['language', 'domain']:
                     if dim in actual_dist:
                         max_error = 0
                         for cat in actual_dist[dim]:
@@ -660,38 +569,15 @@ if 'df' in st.session_state:
     
     # ========== 导出配置 ==========
     st.sidebar.header("📤 导出设置")
-    
-    # 确保导出路径是绝对路径
-    output_path = st.sidebar.text_input(
-        "导出路径 (绝对路径)", 
-        value=os.path.abspath("./balanced_datasets")
-    )
-    
-    # 验证导出路径
-    if output_path:
-        abs_output_path = os.path.abspath(output_path)
-        st.sidebar.caption(f"规范路径: {abs_output_path}")
-        
-        # 检查路径是否可写
-        try:
-            test_file = os.path.join(abs_output_path, ".test_write")
-            os.makedirs(abs_output_path, exist_ok=True)
-            with open(test_file, 'w') as f:
-                f.write("test")
-            os.remove(test_file)
-            st.sidebar.success("✅ 路径可写")
-        except Exception as e:
-            st.sidebar.error(f"❌ 路径不可写: {str(e)}")
-    
+    output_path = st.sidebar.text_input("导出路径", value="./balanced_datasets")
     shard_size = st.sidebar.number_input("分片大小 (GB)", min_value=0.1, value=1.0, step=0.1)
     
     if st.sidebar.button("💾 导出配比数据集", type="primary"):
         if 'sampled_df' not in st.session_state:
             st.sidebar.error("请先应用配比方案")
         else:
-            abs_output_path = os.path.abspath(output_path)
             with st.spinner("正在导出分片..."):
-                export_shards_verified(st.session_state.sampled_df, abs_output_path, shard_size)
+                export_shards(st.session_state.sampled_df, output_path, shard_size)
     
     # ========== 右侧图表展示 ==========
     st.header("📊 数据分布分析")
@@ -705,49 +591,37 @@ if 'df' in st.session_state:
     with col1:
         st.subheader("数据来源 (Source) 分布")
         source_dist = calculate_distribution(df, 'source')
-        if not source_dist.empty:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-        else:
-            st.info("无source分布数据")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')
+        st.pyplot(fig)
     
     # 2. Category 配比图
     with col2:
         st.subheader("数据类别 (Category) 分布")
         category_dist = calculate_distribution(df, 'category')
-        if not category_dist.empty:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-        else:
-            st.info("无category分布数据")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')
+        st.pyplot(fig)
     
     # 3. Domain 配比图
     with col3:
         st.subheader("数据领域 (Domain) 分布")
         domain_dist = calculate_distribution(df, 'domain')
-        if not domain_dist.empty:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-        else:
-            st.info("无domain分布数据")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')
+        st.pyplot(fig)
     
     # 4. Language 配比图
     with col4:
         st.subheader("语言 (Language) 分布")
         lang_dist = calculate_distribution(df, 'language')
-        if not lang_dist.empty:
-            fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
-            ax.axis('equal')
-            st.pyplot(fig)
-        else:
-            st.info("无language分布数据")
+        fig, ax = plt.subplots(figsize=(6, 4))
+        ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
+        ax.axis('equal')
+        st.pyplot(fig)
     
     # 5. Token Count 配比图
     with col5:
@@ -762,16 +636,13 @@ if 'df' in st.session_state:
         
         token_dist = token_dist.reindex([label for _, _, label in TOKEN_BINS])
         
-        if not token_dist.empty:
-            fig, ax = plt.subplots(figsize=(8, 4))
-            ax.bar(token_dist.index, token_dist.values)
-            ax.set_ylabel('Ratio')
-            ax.set_title('Token length distribution')
-            for i, v in enumerate(token_dist.values):
-                ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
-            st.pyplot(fig)
-        else:
-            st.info("无token count分布数据")
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.bar(token_dist.index, token_dist.values)
+        ax.set_ylabel('Ratio')
+        ax.set_title('Token length distribution')
+        for i, v in enumerate(token_dist.values):
+            ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
+        st.pyplot(fig)
     
     # 6. 子类分布图
     with col6:
@@ -780,23 +651,20 @@ if 'df' in st.session_state:
         df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
         subclass_dist = calculate_distribution(df, 'subclass')
         
-        if not subclass_dist.empty:
-            # 取Top 50
-            top50 = subclass_dist.head(50)
-            
-            fig, ax = plt.subplots(figsize=(50, 5))
-            ax.barh(top50.index, top50.values)
-            ax.set_xlabel('Ratio')
-            ax.set_title('Top 50 distribution of subclass combinations')
-            
-            # 添加比例标签
-            for i, v in enumerate(top50.values):
-                ax.text(v + 0.005, i, f'{v:.1%}', va='center')
-            
-            plt.tight_layout()
-            st.pyplot(fig)
-        else:
-            st.info("无子类组合分布数据")
+        # 取Top 50
+        top50 = subclass_dist.head(50)
+        
+        fig, ax = plt.subplots(figsize=(50, 5))
+        ax.barh(top50.index, top50.values)
+        ax.set_xlabel('Ratio')
+        ax.set_title('Top 50 distribution of subclass combinations')
+        
+        # 添加比例标签
+        for i, v in enumerate(top50.values):
+            ax.text(v + 0.005, i, f'{v:.1%}', va='center')
+        
+        plt.tight_layout()
+        st.pyplot(fig)
     
     # 显示数据摘要
     st.divider()
@@ -820,9 +688,6 @@ if 'df' in st.session_state:
             orig_dist = calculate_distribution(df, dim)
             sampled_dist = calculate_distribution(sampled_df, dim)
             
-            if orig_dist.empty or sampled_dist.empty:
-                continue
-                
             # 计算最大误差
             max_error = 0
             for cat in orig_dist.index:
@@ -839,7 +704,7 @@ if 'df' in st.session_state:
                 col3.metric(f"{dim.capitalize()} 最大误差", f"{max_error:.1%}")
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
-    # 用本地SVG替代网络图片（避免CDN问题）
+    # 用本地SVG替代网络图片
     st.markdown("""
     <div style="text-align: center; padding: 20px; background-color: #f0f2f6; border-radius: 10px;">
         <svg xmlns="http://www.w3.org/2000/svg" width="300" height="300" viewBox="0 0 300 300">
@@ -855,18 +720,3 @@ else:
         </svg>
     </div>
     """, unsafe_allow_html=True)
-    
-    # 显示使用说明
-    st.subheader("使用说明")
-    st.markdown("""
-    1. **在左侧输入数据集路径**（必须是包含JSONL文件的文件夹）
-    2. **点击'加载数据集'**（路径诊断可帮助确认路径有效性）
-    3. **分析数据分布**（右侧图表实时显示）
-    4. **调整配比参数**（可同时调整多个维度）
-    5. **导出配比数据集**（指定绝对路径和分片大小）
-    
-    💡 **提示**： 
-    - 确保路径是**绝对路径**
-    - 系统会自动递归查找所有JSONL文件
-    - 支持TB级数据集（利用服务器多核CPU加速）
-    """)
