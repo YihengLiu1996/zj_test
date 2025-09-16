@@ -374,7 +374,10 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                     # 存储到session state
                     st.session_state.df = df
                     st.session_state.total_tokens = total_tokens
+                    
+                    # 为原始数据添加token_bin列
                     st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
+                    df['token_bin'] = st.session_state.token_bins
                     
                     st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
                 else:
@@ -391,6 +394,10 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
 if 'df' in st.session_state:
     df = st.session_state.df
     total_tokens = st.session_state.total_tokens
+    
+    # 确保token_bin列存在
+    if 'token_bin' not in df.columns:
+        df['token_bin'] = [get_token_bin(tc) for tc in df['token_count']]
     
     # ========== 配比调整配置 ==========
     st.sidebar.header("⚖️ 配比调整")
@@ -557,7 +564,10 @@ if 'df' in st.session_state:
     # 5. Token Count 配比图
     with col5:
         st.subheader("Token长度分布")
-        df['token_bin'] = st.session_state.token_bins
+        # 确保token_bin列存在
+        if 'token_bin' not in df.columns:
+            df['token_bin'] = [get_token_bin(tc) for tc in df['token_count']]
+        
         token_dist = calculate_distribution_cached(df, 'token_bin')
         
         # 确保所有分组都存在并按正确顺序排列
@@ -610,6 +620,10 @@ if 'df' in st.session_state:
         st.subheader("🎯 采样质量报告")
         sampled_df = st.session_state.sampled_df
         sampled_tokens = sampled_df['token_count'].sum()
+        
+        # 确保采样数据也有token_bin列
+        if 'token_bin' not in sampled_df.columns:
+            sampled_df['token_bin'] = [get_token_bin(tc) for tc in sampled_df['token_count']]
         
         st.write(f"**采样总量**: {sampled_tokens/1e9:.2f} B tokens")
         st.write(f"**采样比例**: {len(sampled_df)/len(df):.1%}")
