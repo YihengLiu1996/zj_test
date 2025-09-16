@@ -400,7 +400,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                 progress_bar.empty()
                 status_text.empty()
                 
-                if all_
+                if all_data:
                     # 转为DataFrame
                     df = pd.DataFrame(all_data)
                     total_tokens = df['token_count'].sum()
