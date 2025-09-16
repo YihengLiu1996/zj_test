@@ -482,21 +482,21 @@ if 'df' in st.session_state:
     
     # 6. 子类分布图
     with col6:
-        st.subheader("子类组合分布 (Top 50)")
+        st.subheader("子类组合分布 (Top 10)")
         # 创建子类组合
         df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
         subclass_dist = calculate_distribution(df, 'subclass')
         
-        # 取Top 50
-        top50 = subclass_dist.head(50)
+        # 取Top 10
+        top10 = subclass_dist.head(10)
         
-        fig, ax = plt.subplots(figsize=(50, 5))
-        ax.barh(top50.index, top50.values)
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.barh(top10.index, top10.values)
         ax.set_xlabel('比例')
-        ax.set_title('Top 50 distribution of subclass combinations')
+        ax.set_title('Top 10 distribution of subclass combinations')
         
         # 添加比例标签
-        for i, v in enumerate(top50.values):
+        for i, v in enumerate(top10.values):
             ax.text(v + 0.005, i, f'{v:.1%}', va='center')
         
         plt.tight_layout()
