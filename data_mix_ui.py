@@ -461,7 +461,7 @@ if 'df' in st.session_state:
     
     # 5. Token Count 配比图
     with col5:
-        st.subheader("Token length distribution")
+        st.subheader("Token长度分布")
         df['token_bin'] = st.session_state.token_bins
         token_dist = calculate_distribution(df, 'token_bin')
         
@@ -474,8 +474,8 @@ if 'df' in st.session_state:
         
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.bar(token_dist.index, token_dist.values)
-        ax.set_ylabel('比例')
-        ax.set_title('Token长度分布')
+        ax.set_ylabel('Ratio')
+        ax.set_title('Token length distribution')
         for i, v in enumerate(token_dist.values):
             ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
         st.pyplot(fig)
