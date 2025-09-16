@@ -264,7 +264,7 @@ def calculate_distribution_cached(df, column, weights=None):
     """缓存版本的分布计算"""
     return calculate_distribution(df, column, weights)
 
-def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
+def advanced_ipf_solver(df, target_ratios, target_total, max_iter=20, tol=0.02):
     """
     改进的IPF求解器 - 支持多维度同时优化
     """
@@ -368,7 +368,7 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             st.warning(f"⚠️ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
     
     is_converged = all(error <= tol for error in final_errors.values())
-    return weights, actual_dist, is_converged
+    return weights, actual_dist, is_converged, final_errors
 
 def sample_dataset(df, weights, target_total):
     """根据权重进行伯努利采样"""
@@ -679,7 +679,7 @@ if 'processing_mode' in st.session_state:
     # 获取 token_bin 顺序
     token_bin_order = [label for _, _, label in TOKEN_BINS]
     
-    if processing_mode == "memory":
+    if processing_mode == "内存":
         df = st.session_state.df
         total_tokens = st.session_state.total_tokens
         
@@ -783,13 +783,13 @@ if 'processing_mode' in st.session_state:
     
     # 应用配比按钮
     if st.sidebar.button("🎯 应用配比", type="primary"):
-        if processing_mode == "memory":
+        if processing_mode == "内存":
             with st.spinner("正在计算配比方案..."):
                 # 从 session_state 读取最新的目标比例
                 target_ratios = st.session_state.target_ratios
                 
                 # 运行改进的IPF求解器
-                weights, actual_dist, converged = advanced_ipf_solver(
+                weights, actual_dist, converged, final_errors = advanced_ipf_solver(
                     df, 
                     target_ratios, 
                     target_total,
@@ -798,9 +798,10 @@ if 'processing_mode' in st.session_state:
                 )
                 
                 if weights is not None:
-                    # 存储采样结果
+                    # 存储采样结果和误差信息
                     sampled_df = sample_dataset(df, weights, target_total)
                     st.session_state.sampled_df = sampled_df
+                    st.session_state.final_errors = final_errors  # 存储误差信息
                     
                     # 显示采样结果
                     st.sidebar.success("配比方案已生成！")
@@ -846,7 +847,7 @@ if 'processing_mode' in st.session_state:
     # ========== 右侧图表展示 ==========
     st.header("📊 数据分布分析")
     
-    if processing_mode == "memory":
+    if processing_mode == "内存":
         # 内存模式的图表展示
         df = st.session_state.df
         total_tokens = st.session_state.total_tokens
@@ -963,20 +964,29 @@ if 'processing_mode' in st.session_state:
             st.subheader("📈 配比对比分析")
             comparison_cols = st.columns(len(['language', 'domain', 'category', 'token_bin']))
             
+            # 获取存储的误差信息
+            final_errors = st.session_state.get('final_errors', {})
+            
             for i, dim in enumerate(['language', 'domain', 'category', 'token_bin']):
                 with comparison_cols[i]:
-                    orig_dist = calculate_distribution_cached(df, dim)
-                    sampled_dist = calculate_distribution_cached(sampled_df, dim)
-                    
-                    # 计算最大误差
-                    max_error = 0
-                    for cat in orig_dist.index:
-                        orig = orig_dist.get(cat, 0)
-                        sampled = sampled_dist.get(cat, 0)
-                        error = abs(orig - sampled)
-                        max_error = max(max_error, error)
-                    
-                    st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
+                    if dim in final_errors:
+                        # 使用IPF求解器计算出的准确误差
+                        error = final_errors[dim]
+                        st.metric(f"{dim.capitalize()}", f"{error:.1%}", "最大误差")
+                    else:
+                        # 备用计算方法
+                        orig_dist = calculate_distribution_cached(df, dim)
+                        sampled_dist = calculate_distribution_cached(sampled_df, dim)
+                        
+                        # 计算最大误差
+                        max_error = 0
+                        for cat in orig_dist.index:
+                            orig = orig_dist.get(cat, 0)
+                            sampled = sampled_dist.get(cat, 0)
+                            error = abs(orig - sampled)
+                            max_error = max(max_error, error)
+                        
+                        st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
     else:
         # 流式模式的统计信息展示
         stats = st.session_state.stats
