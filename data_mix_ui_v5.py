@@ -217,7 +217,9 @@ class LargeDataSampler:
             for cat, target_ratio in targets.items():
                 current_ratio = current_dist.get(cat, 0)
                 if current_ratio > 0:
-                    weights[dim][cat] = target_ratio / current_ratio
+                    # 限制调整因子范围，避免过度调整
+                    factor = max(0.1, min(10.0, target_ratio / (current_ratio + 1e-8)))
+                    weights[dim][cat] = factor
                 else:
                     weights[dim][cat] = 0
         return weights
@@ -267,6 +269,7 @@ def calculate_distribution_cached(df, column, weights=None):
 def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
     """
     改进的IPF求解器 - 支持多维度同时优化
+    修复：保证所有维度都收敛再停止迭代
     """
     # 初始化权重
     weights = np.ones(len(df))
@@ -291,19 +294,17 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             st.error(f"错误：维度 '{dim}' 的目标比例和({dim_sum:.2%})不在[99%, 101%]范围内")
             return None, None, False, {}
     
-    # 开始IPF迭代
-    converged_dims = set()  # 记录已收敛的维度
+    # 开始IPF迭代 - 修复：保证所有维度都收敛再停止
     all_dims = set(target_ratios.keys())
+    converged_dims = set()  # 记录已收敛的维度
     
     for iter in range(max_iter):
         prev_weights = weights.copy()
         max_errors = {}
+        iteration_converged_dims = set()  # 本轮迭代中收敛的维度
         
-        # 按维度迭代调整（但允许多轮迭代）
+        # 按维度迭代调整
         for dim, targets in target_ratios.items():
-            if dim in converged_dims:
-                continue  # 跳过已收敛的维度
-                
             dim_max_error = 0
             for cat, target_ratio in targets.items():
                 # 计算当前维度类别的加权比例
@@ -312,7 +313,7 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
                 
                 # 计算调整因子（避免除零）
                 if current_ratio > 1e-5 and target_ratio > 0:
-                    factor = target_ratio / current_ratio
+                    factor = target_ratio / (current_ratio + 1e-8)
                     # 限制调整幅度，避免过度调整
                     factor = max(0.5, min(2.0, factor))
                     weights[mask] *= factor
@@ -325,7 +326,10 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             
             # 检查该维度是否收敛
             if dim_max_error < tol:
-                converged_dims.add(dim)
+                iteration_converged_dims.add(dim)
+        
+        # 更新收敛维度集合
+        converged_dims.update(iteration_converged_dims)
         
         # 检查所有维度是否都收敛
         if len(converged_dims) == len(all_dims):
@@ -386,10 +390,12 @@ def sample_dataset(df, weights, target_total):
         additional = target_total - sampled_tokens
         remaining = df[~retained].copy()
         if len(remaining) > 0:
-            remaining_prob = (additional * remaining['token_count'] / 
-                             remaining['token_count'].sum() if remaining['token_count'].sum() > 0 else 0)
-            remaining['prob'] = remaining_prob
-            retained[~retained] = np.random.random(len(remaining)) < np.minimum(remaining['prob'], 1.0)
+            remaining_token_sum = remaining['token_count'].sum()
+            if remaining_token_sum > 0:
+                remaining_prob = (additional * remaining['token_count'] / remaining_token_sum)
+                # 确保概率不超过1
+                remaining['prob'] = np.minimum(remaining_prob, 1.0)
+                retained[~retained] = np.random.random(len(remaining)) < remaining['prob']
     
     return df[retained].copy()
 
@@ -606,7 +612,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                     
                     # 使用线程池并行处理文件
                     with ThreadPoolExecutor(max_workers=8) as executor:
-                        future_to_file = {executor.submit(parse_jsonl_file_pandas, file): file for file in jsonl_files}
+                        future_to_file = {executor.submit(parse_jsonl_file_pandas, file, 50000): file for file in jsonl_files}
                         for i, future in enumerate(as_completed(future_to_file)):
                             result = future.result()
                             all_data.extend(result)
@@ -1019,4 +1025,4 @@ if 'processing_mode' in st.session_state:
 
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
-    st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
+    st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png  ", width=300)
