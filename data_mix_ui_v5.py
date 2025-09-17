@@ -48,70 +48,145 @@ def calculate_distribution_cached(df, column, weights=None):
     """缓存版本的分布计算"""
     return calculate_distribution(df, column, weights)
 
-def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
-    """
-    改进的IPF求解器 - 支持多维度同时优化
-    :param df: 数据DataFrame
-    :param target_ratios: 目标比例字典 {维度: {类别: 比例}}
-    :param target_total: 目标总token数
-    :param max_iter: 最大迭代次数
-    :param tol: 误差容忍度(0.5%)
-    :return: 采样权重数组, 实际分布, 是否收敛
-    """
-    # 初始化权重
-    weights = np.ones(len(df))
-    total_tokens = df['token_count'].sum()
+# def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
+#     """
+#     改进的IPF求解器 - 支持多维度同时优化
+#     :param df: 数据DataFrame
+#     :param target_ratios: 目标比例字典 {维度: {类别: 比例}}
+#     :param target_total: 目标总token数
+#     :param max_iter: 最大迭代次数
+#     :param tol: 误差容忍度(0.5%)
+#     :return: 采样权重数组, 实际分布, 是否收敛
+#     """
+#     # 初始化权重
+#     weights = np.ones(len(df))
+#     total_tokens = df['token_count'].sum()
     
-    # 检查目标比例可行性
-    for dim, targets in target_ratios.items():
-        for cat, ratio in targets.items():
-            # 检查该类别在原始数据中是否存在
-            if cat not in df[dim].values:
-                st.error(f"错误：维度 '{dim}' 中不存在类别 '{cat}'")
-                return None, None, False
-            # 检查目标比例是否超过原始数据最大可能
-            orig_ratio = (df[df[dim] == cat]['token_count'].sum() / total_tokens)
-            if ratio > orig_ratio * 1.05:  # 允许5%缓冲
-                st.warning(f"警告：'{dim}'中'{cat}'目标比例({ratio:.2%})超过原始比例({orig_ratio:.2%})，可能无法精确满足")
-        # 检查维度内比例和
-        dim_sum = sum(targets.values())
-        if not (0.99 <= dim_sum <= 1.01):
-            st.error(f"错误：维度 '{dim}' 的目标比例和({dim_sum:.2%})不在[99%, 101%]范围内")
-            return None, None, False
+#     # 检查目标比例可行性
+#     for dim, targets in target_ratios.items():
+#         for cat, ratio in targets.items():
+#             # 检查该类别在原始数据中是否存在
+#             if cat not in df[dim].values:
+#                 st.error(f"错误：维度 '{dim}' 中不存在类别 '{cat}'")
+#                 return None, None, False
+#             # 检查目标比例是否超过原始数据最大可能
+#             orig_ratio = (df[df[dim] == cat]['token_count'].sum() / total_tokens)
+#             if ratio > orig_ratio * 1.05:  # 允许5%缓冲
+#                 st.warning(f"警告：'{dim}'中'{cat}'目标比例({ratio:.2%})超过原始比例({orig_ratio:.2%})，可能无法精确满足")
+#         # 检查维度内比例和
+#         dim_sum = sum(targets.values())
+#         if not (0.99 <= dim_sum <= 1.01):
+#             st.error(f"错误：维度 '{dim}' 的目标比例和({dim_sum:.2%})不在[99%, 101%]范围内")
+#             return None, None, False
 
-    # 开始IPF迭代
-    # converged_dims = set()  # 不再冻结维度，每次都检查所有维度
-    all_dims = set(target_ratios.keys())
+#     # 开始IPF迭代
+#     # converged_dims = set()  # 不再冻结维度，每次都检查所有维度
+#     all_dims = set(target_ratios.keys())
     
-    for iter in range(max_iter):
-        prev_weights = weights.copy()
-        max_errors = {}
+#     for iter in range(max_iter):
+#         prev_weights = weights.copy()
+#         max_errors = {}
         
-        # 按维度迭代调整
-        for dim, targets in target_ratios.items():
-            # if dim in converged_dims: # 移除维度冻结逻辑
-            #     continue
-            dim_max_error = 0
-            for cat, target_ratio in targets.items():
+#         # 按维度迭代调整
+#         for dim, targets in target_ratios.items():
+#             # if dim in converged_dims: # 移除维度冻结逻辑
+#             #     continue
+#             dim_max_error = 0
+#             for cat, target_ratio in targets.items():
+#                 # 计算当前维度类别的加权比例
+#                 mask = (df[dim] == cat)
+#                 current_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / np.sum(weights * df['token_count'])
+#                 # 计算调整因子（避免除零）
+#                 if current_ratio > 1e-5 and target_ratio > 0:
+#                     factor = target_ratio / current_ratio
+#                     # 限制调整幅度，避免过度调整
+#                     factor = max(0.5, min(2.0, factor))
+#                     weights[mask] *= factor
+#                 # 记录最大误差
+#                 error = abs(current_ratio - target_ratio)
+#                 dim_max_error = max(dim_max_error, error)
+#             max_errors[dim] = dim_max_error
+#             # 检查该维度是否收敛 (但不冻结)
+#             # if dim_max_error < tol:
+#             #     converged_dims.add(dim)
+        
+#         # 检查所有维度是否都收敛
+#         # if len(converged_dims) == len(all_dims): # 改为检查当前误差
+#         if all(error < tol for error in max_errors.values()):
+#             st.info(f"✅ 所有维度在第 {iter+1} 轮迭代后收敛")
+#             break
+            
+#         # 检查权重变化
+#         weight_change = np.mean(np.abs(weights - prev_weights) / (prev_weights + 1e-5))
+#         if weight_change < 1e-5:
+#             st.info(f"⚠️ 权重变化过小，在第 {iter+1} 轮迭代后停止")
+#             break
+
+#     # 缩放至目标总量 (在迭代过程中就考虑目标总量，提高利用冗余的效率)
+#     # 先计算当前加权总和
+#     current_total = np.sum(weights * df['token_count'])
+#     if current_total > 0:
+#         # 计算缩放因子
+#         scale_factor = target_total / current_total
+#         # 应用缩放因子
+#         weights *= scale_factor
+#         # 更新 current_total
+#         current_total = target_total # np.sum(weights * df['token_count'])
+
+#     # 计算实际分布（用于验证）
+#     actual_dist = {}
+#     final_errors = {}
+#     for dim in target_ratios.keys():
+#         actual_dist[dim] = {}
+#         dim_max_error = 0
+#         for cat in target_ratios[dim].keys():
+#             mask = (df[dim] == cat)
+#             # 使用缩放后的权重计算实际比例
+#             actual_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / current_total
+#             actual_dist[dim][cat] = actual_ratio
+#             target_ratio = target_ratios[dim][cat]
+#             error = abs(actual_ratio - target_ratio)
+#             dim_max_error = max(dim_max_error, error)
+#         final_errors[dim] = dim_max_error
+
+#     # 显示各维度误差
+#     st.subheader("📊 各维度配比误差")
+#     for dim, error in final_errors.items():
+#         if error <= tol:
+#             st.success(f"✅ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
+#         else:
+#             st.warning(f"⚠️ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
+#     is_converged = all(error <= tol for error in final_errors.values())
+#     return weights, actual_dist, is_converged
+
+def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
                 # 计算当前维度类别的加权比例
                 mask = (df[dim] == cat)
-                current_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / np.sum(weights * df['token_count'])
-                # 计算调整因子（避免除零）
+                # 使用当前的 weights 计算 current_ratio
+                current_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / current_total if current_total > 1e-5 else 0.0
+                
+                # 计算比例调整因子（避免除零）
                 if current_ratio > 1e-5 and target_ratio > 0:
-                    factor = target_ratio / current_ratio
-                    # 限制调整幅度，避免过度调整
-                    factor = max(0.5, min(2.0, factor))
-                    weights[mask] *= factor
+                    ratio_factor = target_ratio / current_ratio
+                    # 限制比例调整幅度
+                    ratio_factor = max(0.7, min(1.4, ratio_factor))
+                    
+                    # 更新权重：结合比例因子和总量因子
+                    # 这里是关键修改：权重更新同时考虑了比例和总量
+                    # 例如，如果当前总量是目标的80%，则 total_factor 是 1.25
+                    # 如果当前比例是目标的90%，则 ratio_factor 是 ~1.11
+                    # 综合因子约为 1.25 * 1.11 ~= 1.39，权重会增加
+                    combined_factor = ratio_factor * total_factor
+                    
+                    weights[mask] *= combined_factor
+                    
                 # 记录最大误差
                 error = abs(current_ratio - target_ratio)
                 dim_max_error = max(dim_max_error, error)
             max_errors[dim] = dim_max_error
-            # 检查该维度是否收敛 (但不冻结)
-            # if dim_max_error < tol:
-            #     converged_dims.add(dim)
-        
-        # 检查所有维度是否都收敛
-        # if len(converged_dims) == len(all_dims): # 改为检查当前误差
+            # 注意：不再将维度加入 converged_dims 集合
+
+        # 检查所有维度是否都收敛 (在每次迭代后都检查)
         if all(error < tol for error in max_errors.values()):
             st.info(f"✅ 所有维度在第 {iter+1} 轮迭代后收敛")
             break
@@ -122,26 +197,25 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             st.info(f"⚠️ 权重变化过小，在第 {iter+1} 轮迭代后停止")
             break
 
-    # 缩放至目标总量 (在迭代过程中就考虑目标总量，提高利用冗余的效率)
-    # 先计算当前加权总和
+    # 迭代结束后，进行一次最终的总量校准 (可选，但通常是个好主意)
+    # 因为迭代中的 total_factor 是一个近似值
     current_total = np.sum(weights * df['token_count'])
     if current_total > 0:
-        # 计算缩放因子
-        scale_factor = target_total / current_total
-        # 应用缩放因子
-        weights *= scale_factor
-        # 更新 current_total
-        current_total = target_total # np.sum(weights * df['token_count'])
+        final_scale_factor = target_total / current_total
+        weights *= final_scale_factor
+        # 更新 current_total 以用于后续计算
+        current_total = target_total
 
     # 计算实际分布（用于验证）
     actual_dist = {}
     final_errors = {}
+    # 使用最终校准后的 current_total (即 target_total) 来计算实际比例
     for dim in target_ratios.keys():
         actual_dist[dim] = {}
         dim_max_error = 0
         for cat in target_ratios[dim].keys():
             mask = (df[dim] == cat)
-            # 使用缩放后的权重计算实际比例
+            # 使用最终的 weights 和 target_total 计算实际比例
             actual_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / current_total
             actual_dist[dim][cat] = actual_ratio
             target_ratio = target_ratios[dim][cat]
@@ -156,8 +230,10 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             st.success(f"✅ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
         else:
             st.warning(f"⚠️ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
+            
     is_converged = all(error <= tol for error in final_errors.values())
     return weights, actual_dist, is_converged
+
 
 def sample_dataset(df, weights, target_total):
     """根据权重进行伯努利采样"""
