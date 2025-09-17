@@ -451,7 +451,7 @@ if 'df' in st.session_state:
     # 更新 session_state 中的优先级顺序
     if temp_priority_order != st.session_state.priority_order:
         st.session_state.priority_order = temp_priority_order
-        st.experimental_rerun() # 重新运行以更新UI
+        st.rerun() # 重新运行以更新UI
     
     st.sidebar.caption(f"当前优先级顺序: {' > '.join(st.session_state.priority_order)}")
 
