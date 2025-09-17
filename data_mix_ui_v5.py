@@ -476,16 +476,19 @@ st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="./test_data")
 
 # 数据处理模式选择
-# 修复：初始化处理模式
+# 确保 session_state 中有 processing_mode
 if 'processing_mode' not in st.session_state:
     st.session_state.processing_mode = "内存模式（小数据）"
 
-processing_mode = st.sidebar.radio(
+# 根据 session_state 中的值确定 radio 的 index
+current_index = 0 if st.session_state.processing_mode == "内存模式（小数据）" else 1
+
+# 创建 radio 按钮
+processing_mode_selection = st.sidebar.radio(
     "处理模式",
     ["内存模式（小数据）", "流式模式（大数据）"],
-    help="内存模式适用于<100GB数据，流式模式适用于>100GB数据",
-    # 修复：从session state获取当前值
-    index=0 if st.session_state.processing_mode == "内存模式（小数据") else 1
+    index=current_index, # 使用计算出的 index
+    help="内存模式适用于<100GB数据，流式模式适用于>100GB数据"
 )
 
 # 添加路径诊断工具
