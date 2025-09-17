@@ -361,17 +361,28 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                         progress_bar.progress((i + 1) / len(jsonl_files))
                 progress_bar.empty()
                 status_text.empty()
-                if all_data:
+                # 修复3：修正语法错误并添加安全检查
+                if all_data and len(all_data) > 0:  # 修复了 if all_ 的语法错误
                     # 转为DataFrame
-                    df = pd.DataFrame(all_data)
-                    total_tokens = df['token_count'].sum()
+                    df_temp = pd.DataFrame(all_data)
+                    # 安全检查：确保必需的列存在
+                    required_columns = ['source', 'category', 'domain', 'language', 'token_count', 'text']
+                    if not all(col in df_temp.columns for col in required_columns):
+                        st.sidebar.error("❌ 数据缺少必需的列，请检查文件格式")
+                        st.stop()
+                    # 确保token_count是数值类型
+                    df_temp['token_count'] = pd.to_numeric(df_temp['token_count'], errors='coerce')
+                    df_temp = df_temp.dropna(subset=['token_count'])
+                    df_temp['token_count'] = df_temp['token_count'].astype(int)
+                    
+                    total_tokens = df_temp['token_count'].sum()
                     # 存储到session state
-                    st.session_state.df = df
+                    st.session_state.df = df_temp
                     st.session_state.total_tokens = total_tokens
                     # 为原始数据添加token_bin列
-                    st.session_state.token_bins = [get_token_bin(tc) for tc in df['token_count']]
-                    df['token_bin'] = st.session_state.token_bins
-                    st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
+                    st.session_state.token_bins = [get_token_bin(tc) for tc in df_temp['token_count']]
+                    df_temp['token_bin'] = st.session_state.token_bins
+                    st.sidebar.success(f"🎉 加载成功！共 {len(df_temp):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
                 else:
                     st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
                     st.sidebar.info("有效JSONL样本示例:")
@@ -383,7 +394,18 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
 
 # 检查数据是否已加载
 if 'df' in st.session_state:
+    # 安全获取df并验证
     df = st.session_state.df
+    # 再次验证df是否有效
+    if df is None or df.empty or 'token_count' not in df.columns:
+        st.error("数据集无效，请重新加载")
+        # 清理无效状态
+        if 'df' in st.session_state:
+            del st.session_state.df
+        if 'total_tokens' in st.session_state:
+            del st.session_state.total_tokens
+        st.stop()
+        
     total_tokens = st.session_state.total_tokens
     # 确保token_bin列存在
     if 'token_bin' not in df.columns:
