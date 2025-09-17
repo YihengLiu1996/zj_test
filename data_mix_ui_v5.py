@@ -146,12 +146,11 @@ class LargeDataSampler:
                             if current_shard_size + sample_bytes > shard_size_bytes and current_shard_data:
                                 shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
                                 self.write_shard(current_shard_data, shard_path)
+                                # 修复：在清空列表前累加已写入的token数
+                                total_written_tokens += sum(item['token_count'] for item in current_shard_data)
                                 current_shard_data = []
                                 current_shard_size = 0
                                 shard_idx += 1
-                                # 注意：这里应该是累加当前分片的数据量，而不是累加空列表
-                                # 修复：正确计算已写入的token数
-                                total_written_tokens += sum(item['token_count'] for item in current_shard_data)
                             # 添加到当前分片
                             current_shard_data.append({
                                 'source': str(row['source']),
@@ -164,6 +163,7 @@ class LargeDataSampler:
                             current_shard_size += sample_bytes
                 progress = (file_idx + 1) / total_files
                 progress_bar.progress(progress)
+                # 修复：显示已写入的token数（包括最后一个分片的）
                 status_text.text(f"处理进度: {file_idx+1}/{total_files} 文件 | 已写入: {total_written_tokens/1e9:.2f}B tokens")
             except Exception as e:
                 st.warning(f"处理文件 {file_path} 时出错: {str(e)}")
@@ -475,21 +475,19 @@ def parse_jsonl_file_pandas(file_path, chunksize=50000):
 st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="./test_data")
 
-# 数据处理模式选择
-# 确保 session_state 中有 processing_mode
+# 初始化处理模式状态
 if 'processing_mode' not in st.session_state:
-    st.session_state.processing_mode = "内存模式（小数据）"
+    st.session_state.processing_mode = "内存模式（小数据）" # 默认值
 
-# 根据 session_state 中的值确定 radio 的 index
-current_index = 0 if st.session_state.processing_mode == "内存模式（小数据）" else 1
-
-# 创建 radio 按钮
-processing_mode_selection = st.sidebar.radio(
+# 数据处理模式选择 (与 session_state 同步)
+selected_mode = st.sidebar.radio(
     "处理模式",
     ["内存模式（小数据）", "流式模式（大数据）"],
-    index=current_index, # 使用计算出的 index
+    index=0 if st.session_state.processing_mode == "内存模式（小数据）" else 1, # 根据 session_state 设置默认选项
     help="内存模式适用于<100GB数据，流式模式适用于>100GB数据"
 )
+# 更新 session_state (如果用户改变了选择)
+st.session_state.processing_mode = selected_mode
 
 # 添加路径诊断工具
 if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
@@ -517,7 +515,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
         st.sidebar.info(f"正在处理路径: {data_path}")
         with st.spinner("🔍 正在扫描数据集文件..."):
             try:
-                if processing_mode == "内存模式（小数据）":
+                if st.session_state.processing_mode == "内存模式（小数据）":
                     # 原有的内存模式处理
                     jsonl_files = []
                     for root, _, files in os.walk(data_path):
@@ -552,14 +550,15 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                         # 存储到session state
                         st.session_state.df = df
                         st.session_state.total_tokens = total_tokens
-                        st.session_state.processing_mode = "内存"
+                        # st.session_state.processing_mode = "内存" # 旧的不一致的值
+                        st.session_state.processing_mode = "内存模式（小数据）" # 新的，与 radio 选项一致的值
                         st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
                     else:
                         st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
                         st.sidebar.info("有效JSONL样本示例:")
                         st.sidebar.code('''{"source": "CCI4", "category": "book", "domain": "science", "language": "CN", "token_count": 1234, "text": "示例文本..."}''')
                         st.stop()
-                else:  # 流式模式
+                else:  # 流式模式 (st.session_state.processing_mode == "流式模式（大数据）")
                     # 大数据流式处理
                     sampler = LargeDataSampler(data_path)
                     file_count = sampler.scan_files()
@@ -572,15 +571,17 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                     # 存储到session state
                     st.session_state.sampler = sampler
                     st.session_state.stats = stats
-                    st.session_state.processing_mode = "流式"
+                    # st.session_state.processing_mode = "流式" # 旧的不一致的值
+                    st.session_state.processing_mode = "流式模式（大数据）" # 新的，与 radio 选项一致的值
                     st.sidebar.success(f"🎉 统计完成！共 {stats['total_samples']:,} 个样本，{stats['total_tokens']/1e9:.2f}B tokens")
             except Exception as e:
                 st.sidebar.exception(f"_fatal error_: {str(e)}")
                 st.stop()
 
 # 检查数据是否已加载
-if 'processing_mode' in st.session_state and st.session_state.processing_mode in ["内存", "流式"]:
-    processing_mode_session = st.session_state.processing_mode
+# 使用更明确的条件检查
+if ('df' in st.session_state and st.session_state.processing_mode == "内存模式（小数据）") or \
+   ('sampler' in st.session_state and st.session_state.processing_mode == "流式模式（大数据）"):
     # ========== 配比调整配置 ==========
     st.sidebar.header("⚖️ 配比调整")
     # 目标总量输入
@@ -600,7 +601,7 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
         st.session_state.target_ratios = {}
     # 获取 token_bin 顺序
     token_bin_order = [label for _, _, label in TOKEN_BINS]
-    if processing_mode_session == "内存":
+    if st.session_state.processing_mode == "内存模式（小数据）": # 修改判断条件
         df = st.session_state.df
         total_tokens = st.session_state.total_tokens
         # 确保token_bin列存在
@@ -646,7 +647,7 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
             st.sidebar.caption(f"当前和: {total_ratio:.2%}")
             if not (0.99 <= total_ratio <= 1.01):
                 st.sidebar.warning("比例和应接近100%")
-    else:  # streaming mode
+    else:  # streaming mode (st.session_state.processing_mode == "流式模式（大数据）")
         stats = st.session_state.stats
         for dim in dimensions:
             st.sidebar.subheader(f"{dim.capitalize()} 配比")
@@ -687,7 +688,7 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
                 st.sidebar.warning("比例和应接近100%")
     # 应用配比按钮
     if st.sidebar.button("🎯 应用配比", type="primary"):
-        if processing_mode_session == "内存":
+        if st.session_state.processing_mode == "内存模式（小数据）": # 修改判断条件
             with st.spinner("正在计算配比方案..."):
                 # 从 session_state 读取最新的目标比例
                 target_ratios = st.session_state.target_ratios
@@ -712,7 +713,7 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
                         st.sidebar.success("✅ 所有维度配比均已满足！")
                     else:
                         st.sidebar.warning("⚠️ 部分维度配比未完全满足，请检查误差报告")
-        else:  # streaming mode
+        else:  # streaming mode (st.session_state.processing_mode == "流式模式（大数据）")
             with st.spinner("正在流式采样大数据集..."):
                 sampler = st.session_state.sampler
                 target_ratios = st.session_state.target_ratios
@@ -733,14 +734,17 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
     shard_size = st.sidebar.number_input("分片大小 (GB)", min_value=0.1, value=1.0, step=0.1)
     max_export_workers = st.sidebar.slider("导出并行线程数", min_value=1, max_value=16, value=4)
     if st.sidebar.button("💾 导出配比数据集", type="primary"):
-        if 'sampled_df' not in st.session_state:
-            st.sidebar.error("请先应用配比方案")
-        else:
-            with st.spinner("正在导出分片..."):
-                export_shards_parallel(st.session_state.sampled_df, output_path, shard_size, max_export_workers)
+        if st.session_state.processing_mode == "内存模式（小数据）": # 只在内存模式下执行
+             if 'sampled_df' not in st.session_state:
+                 st.sidebar.error("请先应用配比方案")
+             else:
+                 with st.spinner("正在导出分片..."):
+                     export_shards_parallel(st.session_state.sampled_df, output_path, shard_size, max_export_workers)
+        else: # 流式模式
+             st.sidebar.warning("流式模式下数据已直接写入磁盘，请查看输出路径。") # 给用户提示
     # ========== 右侧图表展示 ==========
     st.header("📊 数据分布分析")
-    if processing_mode_session == "内存":
+    if st.session_state.processing_mode == "内存模式（小数据）": # 修改判断条件
         # 内存模式的图表展示
         df = st.session_state.df
         total_tokens = st.session_state.total_tokens
@@ -856,7 +860,7 @@ if 'processing_mode' in st.session_state and st.session_state.processing_mode in
                             error = abs(orig - sampled)
                             max_error = max(max_error, error)
                         st.metric(f"{dim.capitalize()}", f"{max_error*100:.1f}%", "最大误差")
-    else:
+    else: # 流式模式 (st.session_state.processing_mode == "流式模式（大数据）")
         # 流式模式的统计信息展示
         stats = st.session_state.stats
         st.subheader("📊 数据统计信息")
