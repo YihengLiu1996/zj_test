@@ -15,16 +15,6 @@ import math
 import dask.dataframe as dd
 from dask import delayed
 import gc
-from dask.distributed import Client
-import psutil
-
-# 配置Dask调度器
-try:
-    client = Client(processes=False, threads_per_worker=4, n_workers=2, memory_limit='4GB')
-    st.sidebar.success("✅ Dask调度器已启动")
-except Exception as e:
-    st.sidebar.warning(f"⚠️ Dask调度器启动失败: {str(e)}")
-    client = None
 
 # 配置页面
 st.set_page_config(layout="wide", page_title="数据配比工具")
@@ -59,42 +49,49 @@ def calculate_distribution_chunked(df_chunk, column, weights_chunk=None):
     return chunk_dist.sort_values(ascending=False)
 
 @st.cache_data
-def calculate_distribution_cached(df_path, column):
-    """缓存版本的分布计算（支持大文件）"""
-    # 使用Dask读取并计算分布
-    df = dd.read_json(df_path, lines=True)
-    df['token_bin'] = df['token_count'].apply(get_token_bin, meta=('token_bin', 'object'))
-    total_tokens = df['token_count'].sum().compute()
-    dist = df.groupby(column)['token_count'].sum().compute() / total_tokens
-    return dist.sort_values(ascending=False)
-
-# ========== 全局分布计算函数 ==========
-@st.cache_data(ttl=3600)
-def compute_global_distribution(df_paths, dimensions):
-    """使用 Dask 计算所有维度的确切分布"""
-    st.info("🔄 正在计算全局分布...")
+def calculate_exact_distribution(df_paths, column):
+    """精确计算所有文件的整体分布（使用Dask）"""
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
     
-    # 初始化各维度的统计结果
-    results = {}
-    
-    # 合并所有文件为一个 Dask DataFrame
-    ddf_list = [dd.read_json(path, lines=True) for path in df_paths]
-    combined_ddf = dd.concat(ddf_list, interleave_partitions=True)
-    
-    # 添加 token_bin 列
-    combined_ddf['token_bin'] = combined_ddf['token_count'].apply(get_token_bin, meta=('token_bin', 'object'))
-    
-    # 总 token 数
-    total_tokens = delayed(sum)([ddf['token_count'].sum() for ddf in ddf_list])
-    total_tokens = total_tokens.compute()
-    
-    # 对每个维度进行分组统计
-    for dim in dimensions:
-        dist = combined_ddf.groupby(dim)['token_count'].sum().compute() / total_tokens
-        results[dim] = dist.sort_values(ascending=False)
-    
-    st.success("✅ 全局分布计算完成！")
-    return results, total_tokens
+    try:
+        # 分批读取文件以避免内存问题
+        batch_size = 10
+        all_dfs = []
+        total_files = len(df_paths)
+        
+        for i in range(0, total_files, batch_size):
+            batch_paths = df_paths[i:i + batch_size]
+            batch_dfs = []
+            
+            for j, f in enumerate(batch_paths):
+                batch_dfs.append(dd.read_json(f, lines=True))
+                progress = (i + j + 1) / total_files
+                progress_bar.progress(progress)
+                progress_text.text(f"正在读取文件: {i + j + 1}/{total_files}")
+            
+            batch_combined = dd.concat(batch_dfs)
+            all_dfs.append(batch_combined)
+        
+        progress_text.text("正在合并数据...")
+        combined_df = dd.concat(all_dfs)
+        
+        if column == 'token_bin':
+            progress_text.text("正在计算Token区间...")
+            combined_df = combined_df.assign(token_bin=combined_df['token_count'].apply(get_token_bin, meta=('token_bin', 'object')))
+        
+        progress_text.text("正在计算分布...")
+        total_tokens = combined_df['token_count'].sum().compute()
+        dist = combined_df.groupby(column)['token_count'].sum().compute() / total_tokens
+        
+        progress_bar.empty()
+        progress_text.empty()
+        return dist.sort_values(ascending=False)
+        
+    except Exception as e:
+        progress_bar.empty()
+        progress_text.empty()
+        raise e
 
 def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_order, max_iter=100, tol=0.005):
     """
@@ -109,7 +106,10 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
     """
     
     # 初始化：计算全局统计信息
-    st.info("正在计算全局统计信息...")
+    progress_text = st.empty()
+    progress_bar = st.progress(0)
+    progress_text.text("正在计算全局统计信息...")
+    
     global_stats = {}
     total_tokens = 0
     
@@ -117,17 +117,31 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
     for dim in target_ratios.keys():
         global_stats[dim] = {}
     
-    for file_path in df_paths:
-        df_chunk = dd.read_json(file_path, lines=True)
-        chunk_total = df_chunk['token_count'].sum().compute()
-        total_tokens += chunk_total
-        
-        for dim in target_ratios.keys():
-            dim_stats = df_chunk.groupby(dim)['token_count'].sum().compute()
-            for cat, count in dim_stats.items():
-                if cat not in global_stats[dim]:
-                    global_stats[dim][cat] = 0
-                global_stats[dim][cat] += count
+    total_files = len(df_paths)
+    for idx, file_path in enumerate(df_paths):
+        try:
+            df_chunk = dd.read_json(file_path, lines=True)
+            chunk_total = df_chunk['token_count'].sum().compute()
+            total_tokens += chunk_total
+            
+            for dim in target_ratios.keys():
+                if dim in df_chunk.columns:
+                    dim_stats = df_chunk.groupby(dim)['token_count'].sum().compute()
+                    for cat, count in dim_stats.items():
+                        if cat not in global_stats[dim]:
+                            global_stats[dim][cat] = 0
+                        global_stats[dim][cat] += count
+            
+            progress = (idx + 1) / total_files
+            progress_bar.progress(progress)
+            progress_text.text(f"正在分析文件: {idx + 1}/{total_files}")
+            
+        except Exception as e:
+            st.warning(f"跳过文件 {file_path}: {str(e)}")
+            continue
+    
+    progress_bar.empty()
+    progress_text.empty()
     
     # 计算原始比例
     orig_ratios = {}
@@ -153,7 +167,7 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
         return None, None, False
 
     # 初始化权重字典（按文件和索引存储）
-    st.info("正在初始化权重...")
+    progress_text.text("正在初始化权重...")
     weights_dict = {}  # {file_path: {index: weight}}
     
     # 第一次遍历：初始化权重
@@ -171,7 +185,7 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
     all_dims = list(target_ratios.keys())
     
     for iter in range(max_iter):
-        st.info(f"正在进行第 {iter+1} 轮迭代...")
+        progress_text.text(f"正在进行第 {iter+1} 轮迭代...")
         max_errors = {}
         
         # 计算当前总token数
@@ -226,7 +240,7 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
             break
 
     # 计算最终的实际分布
-    st.info("正在计算最终分布...")
+    progress_text.text("正在计算最终分布...")
     actual_dist = {}
     final_errors = {}
     
@@ -275,6 +289,7 @@ def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_
             st.warning(f"⚠️ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
             
     is_converged = all(error <= tol for error in final_errors.values())
+    progress_text.empty()
     return weights_dict, actual_dist, is_converged
 
 def sample_dataset_streaming(df_paths, weights_dict, target_total, output_path, shard_size_gb=1):
@@ -534,24 +549,30 @@ if 'df_paths' in st.session_state:
     
     token_bin_order = [label for _, _, label in TOKEN_BINS]
     
-    # 获取维度的唯一值（基于采样数据）
+    # 获取维度的唯一值（基于所有数据）
     st.sidebar.info("正在分析维度分布...")
     dimension_values = {}
-    for dim in dimensions:
+    progress_text = st.sidebar.empty()
+    progress_bar = st.sidebar.progress(0)
+    
+    for idx, dim in enumerate(dimensions):
         if dim == 'token_bin':
             dimension_values[dim] = token_bin_order
         else:
-            all_values = set()
-            sample_files = df_paths[:min(5, len(df_paths))]  # 采样前5个文件
-            for file_path in sample_files:
-                try:
-                    df_sample = dd.read_json(file_path, lines=True)
-                    if dim in df_sample.columns:
-                        unique_vals = df_sample[dim].drop_duplicates().compute()
-                        all_values.update(unique_vals.tolist())
-                except Exception as e:
-                    st.sidebar.warning(f"读取文件 {file_path} 时出错: {str(e)}")
-            dimension_values[dim] = sorted(list(all_values))
+            try:
+                # 使用所有文件计算唯一值
+                all_dfs = [dd.read_json(f, lines=True) for f in df_paths]
+                combined_df = dd.concat(all_dfs)
+                unique_vals = combined_df[dim].drop_duplicates().compute()
+                dimension_values[dim] = sorted(unique_vals.tolist())
+                progress_text.text(f"分析维度: {dim}")
+                progress_bar.progress((idx + 1) / len(dimensions))
+            except Exception as e:
+                st.sidebar.warning(f"读取维度 {dim} 时出错: {str(e)}")
+                dimension_values[dim] = []
+    
+    progress_bar.empty()
+    progress_text.empty()
     
     for dim in dimensions:
         st.sidebar.subheader(f"{dim.capitalize()} 配比")
@@ -631,10 +652,7 @@ if 'df_paths' in st.session_state:
     # ========== 右侧图表展示 ==========
     st.header("📊 数据分布分析")
     
-    # 调用全局分布计算
-    with st.spinner("🔍 正在分析全局分布..."):
-        global_dist, actual_total_tokens = compute_global_distribution(df_paths, dimensions)
-
+    # 基于所有文件进行精确分析
     col1, col2 = st.columns(2)
     col3, col4 = st.columns(2)
     col5, col6 = st.columns(2)
@@ -643,7 +661,7 @@ if 'df_paths' in st.session_state:
     with col1:
         st.subheader("数据来源 (Source) 分布")
         try:
-            source_dist = global_dist['source']
+            source_dist = calculate_exact_distribution(df_paths, 'source')
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
@@ -655,7 +673,7 @@ if 'df_paths' in st.session_state:
     with col2:
         st.subheader("数据类别 (Category) 分布")
         try:
-            category_dist = global_dist['category']
+            category_dist = calculate_exact_distribution(df_paths, 'category')
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
@@ -667,7 +685,7 @@ if 'df_paths' in st.session_state:
     with col3:
         st.subheader("数据领域 (Domain) 分布")
         try:
-            domain_dist = global_dist['domain']
+            domain_dist = calculate_exact_distribution(df_paths, 'domain')
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
@@ -679,9 +697,9 @@ if 'df_paths' in st.session_state:
     with col4:
         st.subheader("语言 (Language) 分布")
         try:
-            lang_dist = global_dist['language']
+            language_dist = calculate_exact_distribution(df_paths, 'language')
             fig, ax = plt.subplots(figsize=(6, 4))
-            ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
+            ax.pie(language_dist, labels=language_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
             st.pyplot(fig)
         except Exception as e:
@@ -691,10 +709,10 @@ if 'df_paths' in st.session_state:
     with col5:
         st.subheader("Token长度分布")
         try:
-            token_dist = global_dist['token_bin']
+            token_dist = calculate_exact_distribution(df_paths, 'token_bin')
             ordered_labels = [label for _, _, label in TOKEN_BINS]
             dist_values = [token_dist.get(label, 0) for label in ordered_labels]
-
+            
             fig, ax = plt.subplots(figsize=(8, 4))
             ax.bar(ordered_labels, dist_values)
             ax.set_ylabel('Ratio')
@@ -705,29 +723,53 @@ if 'df_paths' in st.session_state:
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
-    # 6. 子类组合分布图
+    # 6. 子类分布图
     with col6:
         st.subheader("子类组合分布 (Top 10)")
         try:
-            subclass_data = []
-            for file_path in df_paths[:min(3, len(df_paths))]:  # 控制采样数量
-                df_sample = dd.read_json(file_path, lines=True)
-                df_sample['subclass'] = df_sample['source'] + "+" + df_sample['category'] + "+" + df_sample['domain'] + "+" + df_sample['language']
-                subclass_data.append(df_sample)
-            if subclass_data:
-                combined_df = dd.concat(subclass_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                subclass_dist = combined_df.groupby('subclass')['token_count'].sum().compute() / total_tokens
-                top10 = subclass_dist.nlargest(10)
+            # 分批处理以避免内存问题
+            batch_size = 10
+            all_subclass_data = []
+            total_files = len(df_paths)
+            
+            progress_text = st.empty()
+            progress_bar = st.progress(0)
+            
+            for i in range(0, total_files, batch_size):
+                batch_paths = df_paths[i:i + batch_size]
+                batch_dfs = []
                 
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ax.barh(top10.index, top10.values)
-                ax.set_xlabel('比例')
-                ax.set_title('Top 10 distribution of subclass combinations')
-                for i, v in enumerate(top10.values):
-                    ax.text(v + 0.005, i, f'{v:.1%}', va='center')
-                plt.tight_layout()
-                st.pyplot(fig)
+                for j, f in enumerate(batch_paths):
+                    df_sample = dd.read_json(f, lines=True)
+                    df_sample['subclass'] = df_sample['source'] + "+" + df_sample['category'] + "+" + df_sample['domain'] + "+" + df_sample['language']
+                    batch_dfs.append(df_sample)
+                    progress = (i + j + 1) / total_files
+                    progress_bar.progress(progress)
+                    progress_text.text(f"正在处理子类组合: {i + j + 1}/{total_files}")
+                
+                batch_combined = dd.concat(batch_dfs)
+                all_subclass_data.append(batch_combined)
+            
+            progress_text.text("正在合并子类数据...")
+            combined_df = dd.concat(all_subclass_data)
+            
+            progress_text.text("正在计算子类分布...")
+            total_tokens = combined_df['token_count'].sum().compute()
+            subclass_dist = combined_df.groupby('subclass')['token_count'].sum().compute() / total_tokens
+            top10 = subclass_dist.nlargest(10)
+            
+            fig, ax = plt.subplots(figsize=(10, 5))
+            ax.barh(top10.index, top10.values)
+            ax.set_xlabel('比例')
+            ax.set_title('Top 10 distribution of subclass combinations')
+            for i, v in enumerate(top10.values):
+                ax.text(v + 0.005, i, f'{v:.1%}', va='center')
+            plt.tight_layout()
+            st.pyplot(fig)
+            
+            progress_bar.empty()
+            progress_text.empty()
+            
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
@@ -735,16 +777,9 @@ if 'df_paths' in st.session_state:
     st.divider()
     st.subheader("🔍 数据摘要")
     st.write(f"**文件数量**: {len(df_paths)}")
-    st.write(f"**实际总Token数**: {actual_total_tokens / 1e9:.2f} B (10亿)")
+    if estimated_total_tokens > 0:
+        st.write(f"**估算总Token数**: {estimated_total_tokens/1e9:.2f} B (10亿)")
     
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
     st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
-
-# 内存监控
-if st.sidebar.checkbox("🔍 显示内存使用情况"):
-    process = psutil.Process(os.getpid())
-    memory_info = process.memory_info()
-    st.sidebar.info(f"当前内存使用: {memory_info.rss / 1024 / 1024:.2f} MB")
-    if client:
-        st.sidebar.info(f"Dask集群状态: {client.dashboard_link}")
