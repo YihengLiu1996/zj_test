@@ -450,7 +450,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                 st.session_state.df_paths = jsonl_files
                 st.session_state.data_path = data_path
                 
-                # 计算总样本数和token数（采样估算）
+                # 计算总样本数和token数（精确计算）
                 sample_file = jsonl_files[0]
                 try:
                     with open(sample_file, 'r', encoding='utf-8') as f:
@@ -461,31 +461,42 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                 except Exception as e:
                     st.sidebar.warning(f"⚠️ 无法读取示例文件: {str(e)}")
                 
-                # 估算总数据量
-                st.sidebar.info("正在估算数据总量...")
+                # 精确计算总数据量
+                st.sidebar.info("正在计算数据总量...")
                 total_samples = 0
                 total_tokens = 0
-                sample_count = min(10, len(jsonl_files))  # 采样前10个文件
                 
-                for i, file_path in enumerate(jsonl_files[:sample_count]):
+                # 使用进度条显示计算进度
+                progress_text = st.sidebar.empty()
+                progress_bar = st.sidebar.progress(0)
+                total_files = len(jsonl_files)
+                
+                for i, file_path in enumerate(jsonl_files):
                     try:
-                        df_sample = dd.read_json(file_path, lines=True).head(1000)  # 读取前1000行
-                        total_samples += len(df_sample)
-                        total_tokens += df_sample['token_count'].sum()
+                        df_file = dd.read_json(file_path, lines=True)
+                        file_samples = len(df_file)
+                        file_tokens = df_file['token_count'].sum().compute()
+                        total_samples += file_samples
+                        total_tokens += file_tokens
+                        
+                        progress = (i + 1) / total_files
+                        progress_bar.progress(progress)
+                        progress_text.text(f"正在计算: {i + 1}/{total_files} 文件 | 当前总计: {total_tokens/1e9:.2f}B tokens")
+                        
                     except Exception as e:
                         st.sidebar.warning(f"无法读取文件 {file_path}: {str(e)}")
                 
+                progress_bar.empty()
+                progress_text.empty()
+                
                 if total_samples > 0:
-                    avg_tokens_per_sample = total_tokens / total_samples
-                    estimated_total_samples = int(total_samples / sample_count * len(jsonl_files))
-                    estimated_total_tokens = int(estimated_total_samples * avg_tokens_per_sample)
-                    st.session_state.estimated_total_tokens = estimated_total_tokens
-                    st.session_state.estimated_total_samples = estimated_total_samples
-                    st.sidebar.success(f"🎉 数据扫描完成！")
-                    st.sidebar.info(f"估算样本数: {estimated_total_samples:,}")
-                    st.sidebar.info(f"估算Token数: {estimated_total_tokens/1e9:.2f}B tokens")
+                    st.session_state.total_tokens = total_tokens
+                    st.session_state.total_samples = total_samples
+                    st.sidebar.success(f"🎉 数据加载完成！")
+                    st.sidebar.info(f"总样本数: {total_samples:,}")
+                    st.sidebar.info(f"总Token数: {total_tokens/1e9:.2f}B tokens")
                 else:
-                    st.sidebar.error("❌ 无法估算数据量")
+                    st.sidebar.error("❌ 无法计算数据量")
                     st.stop()
                     
             except Exception as e:
@@ -495,7 +506,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
 # 检查数据是否已加载
 if 'df_paths' in st.session_state:
     df_paths = st.session_state.df_paths
-    estimated_total_tokens = st.session_state.get('estimated_total_tokens', 0)
+    total_tokens = st.session_state.get('total_tokens', 0)
     
     # ========== 配比调整配置 ==========
     st.sidebar.header("⚖️ 配比调整")
@@ -777,8 +788,8 @@ if 'df_paths' in st.session_state:
     st.divider()
     st.subheader("🔍 数据摘要")
     st.write(f"**文件数量**: {len(df_paths)}")
-    if estimated_total_tokens > 0:
-        st.write(f"**估算总Token数**: {estimated_total_tokens/1e9:.2f} B (10亿)")
+    if total_tokens > 0:
+        st.write(f"**总Token数**: {total_tokens/1e9:.2f} B (10亿)")
     
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
