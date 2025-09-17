@@ -635,7 +635,7 @@ if 'df' in st.session_state:
         st.write(f"**采样总量**: {sampled_tokens/1e9:.2f} B tokens")
         st.write(f"**采样比例**: {len(sampled_df)/len(df):.1%}")
         # 比较关键维度
-        st.subheader("📈 配比对比分析")
+        st.subheader("📈 原始配比与目标配比偏离分析")
         comparison_cols = st.columns(len(['language', 'domain', 'category', 'token_bin']))
         for i, dim in enumerate(['language', 'domain', 'category', 'token_bin']):
             with comparison_cols[i]:
@@ -648,7 +648,7 @@ if 'df' in st.session_state:
                     sampled = sampled_dist.get(cat, 0)
                     error = abs(orig - sampled)
                     max_error = max(max_error, error)
-                st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
+                st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大偏离")
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
     st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
