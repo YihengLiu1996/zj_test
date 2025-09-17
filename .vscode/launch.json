@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Streamlit Debug",
+            "type": "python",
+            "request": "launch",
+            "program": "data_mix_ui_v7.py",  // 例如: "data_balancing_tool.py"
+            "console": "integratedTerminal",
+            "env": {
+                "STREAMLIT_SERVER_PORT": "8001",
+                "PYTHONPATH": "${workspaceFolder}"
+            },
+            "args": ["run", "data_mix_ui_v7.py"],  // 例如: ["run", "data_balancing_tool.py"]
+            "justMyCode": false,
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}
