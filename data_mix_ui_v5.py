@@ -24,6 +24,24 @@ TOKEN_BINS = [
     (32768, float('inf'), ">32k")
 ]
 GB = 1024 * 1024 * 1024  # 1GB in bytes
+# ========== 添加应用重置功能 ==========
+# 在侧边栏最顶部添加重置按钮
+st.sidebar.header("🔧 配置面板")
+if st.sidebar.button("🔄 重置应用状态", help="清除所有状态并重新初始化应用", type="secondary"):
+    # 清除所有session state
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()  # 使用新版本的rerun方法
+
+# 初始化检查
+if 'app_initialized' not in st.session_state:
+    st.session_state.app_initialized = True
+    # 清理可能的残留状态
+    for key in ['df', 'total_tokens', 'sampled_df', 'target_ratios', 'target_distribution']:
+        if key in st.session_state:
+            del st.session_state[key]
+    st.rerun()
+
 # 工具函数
 def get_token_bin(token_count):
     """确定token_count所属区间"""
@@ -31,6 +49,7 @@ def get_token_bin(token_count):
         if low <= token_count < high:
             return label
     return ">32k"
+
 def calculate_distribution(df, column, weights=None):
     """计算加权分布"""
     if weights is None:
@@ -38,10 +57,12 @@ def calculate_distribution(df, column, weights=None):
     total = weights.sum()
     dist = df.groupby(column).apply(lambda x: np.sum(weights[x.index]) / total)
     return dist.sort_values(ascending=False)
+
 @st.cache_data
 def calculate_distribution_cached(df, column, weights=None):
     """缓存版本的分布计算"""
     return calculate_distribution(df, column, weights)
+
 def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
     """
     改进的IPF求解器 - 支持多维度同时优化
@@ -71,29 +92,33 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
         if not (0.99 <= dim_sum <= 1.01):
             st.error(f"错误：维度 '{dim}' 的目标比例和({dim_sum:.2%})不在[99%, 101%]范围内")
             return None, None, False
+    
     # 开始IPF迭代
     for iter in range(max_iter):
         prev_weights = weights.copy()
         max_errors = {}
-        # 按维度迭代调整（现在每次迭代都调整所有维度）
+        
+        # 按维度迭代调整（关键修改1：不再跳过已收敛维度）
         for dim, targets in target_ratios.items():
             dim_max_error = 0
             for cat, target_ratio in targets.items():
                 # 计算当前维度类别的加权比例
                 mask = (df[dim] == cat)
                 current_ratio = np.sum(weights[mask] * df.loc[mask, 'token_count']) / np.sum(weights * df['token_count'])
+                
                 # 计算调整因子（避免除零）
                 if current_ratio > 1e-5 and target_ratio > 0:
                     factor = target_ratio / current_ratio
                     # 限制调整幅度，避免过度调整
                     factor = max(0.5, min(2.0, factor))
                     weights[mask] *= factor
+                
                 # 记录最大误差
                 error = abs(current_ratio - target_ratio)
                 dim_max_error = max(dim_max_error, error)
             max_errors[dim] = dim_max_error
         
-        # 调整总量（关键改进：将目标总量融入IPF迭代过程）
+        # 关键修改2：将目标总量融入IPF迭代过程
         current_total = np.sum(weights * df['token_count'])
         if current_total > 0:
             # 直接缩放权重，使期望总量接近目标
@@ -133,23 +158,27 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005
             error = abs(actual_ratio - target_ratio)
             dim_max_error = max(dim_max_error, error)
         final_errors[dim] = dim_max_error
+    
     # 显示各维度误差
-    st.subheader("📊 各维度配比误差")
+    st.subheader("📊 各维度配比误差（与目标分布比较）")
     for dim, error in final_errors.items():
         if error <= tol:
             st.success(f"✅ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
         else:
             st.warning(f"⚠️ {dim}: 最大误差 {error:.3f} ({error*100:.1f}%)")
+    
     is_converged = all(error <= tol for error in final_errors.values())
     return weights, actual_dist, is_converged
+
 def sample_dataset(df, weights, target_total):
     """根据权重进行伯努利采样（简化版）"""
     # 生成保留概率（截断到[0,1]）
     probs = np.minimum(weights, 1.0)
     # 伯努利采样
     retained = np.random.random(len(df)) < probs
-    # 直接返回采样结果，不再进行"补充"
+    # 直接返回采样结果，不再进行"补充"（关键修改3：移除补充采样逻辑）
     return df[retained].copy()
+
 def write_shard_batch(rows, shard_path):
     """批量写入分片文件"""
     try:
@@ -166,6 +195,7 @@ def write_shard_batch(rows, shard_path):
         return True, shard_path
     except Exception as e:
         return False, f"Error writing {shard_path}: {str(e)}"
+
 def export_shards_parallel(df, output_path, shard_size_gb=1, max_workers=4):
     """并行分片导出JSONL文件"""
     os.makedirs(output_path, exist_ok=True)
@@ -237,6 +267,7 @@ def export_shards_parallel(df, output_path, shard_size_gb=1, max_workers=4):
             st.error(f"... 还有 {len(failed_files) - 5} 个错误")
     else:
         st.success(f"导出完成！共 {success_count} 个分片，路径: {output_path}")
+
 def parse_jsonl_file_pandas(file_path, chunksize=50000):
     """使用pandas高效解析JSONL文件（支持分块读取）"""
     records = []
@@ -269,9 +300,10 @@ def parse_jsonl_file_pandas(file_path, chunksize=50000):
     except Exception as e:
         print(f"Error parsing {file_path}: {e}")
     return records
+
 # ========== 左侧配置栏 ==========
-st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
+
 # 添加路径诊断工具
 if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
     st.sidebar.subheader("路径诊断")
@@ -282,6 +314,7 @@ if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
         st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
     else:
         st.sidebar.error("❌ 路径不存在或无效")
+
 # 加载数据按钮
 if st.sidebar.button("📁 加载数据集", type="primary"):
     if not data_path:
@@ -347,6 +380,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
             except Exception as e:
                 st.sidebar.exception(f"_fatal error_: {str(e)}")
                 st.stop()
+
 # 检查数据是否已加载
 if 'df' in st.session_state:
     df = st.session_state.df
@@ -354,6 +388,7 @@ if 'df' in st.session_state:
     # 确保token_bin列存在
     if 'token_bin' not in df.columns:
         df['token_bin'] = [get_token_bin(tc) for tc in df['token_count']]
+    
     # ========== 配比调整配置 ==========
     st.sidebar.header("⚖️ 配比调整")
     # 目标总量输入
@@ -365,14 +400,17 @@ if 'df' in st.session_state:
         help="1B = 10亿tokens"
     )
     target_total = int(target_total_b * 1e9)
+    
     # 动态生成各维度配比输入
     dimensions = ['source', 'category', 'domain', 'language', 'token_bin']
     target_ratios = {}
     # 初始化 session_state 存储目标比例
     if 'target_ratios' not in st.session_state:
         st.session_state.target_ratios = {}
+    
     # 获取 token_bin 顺序
     token_bin_order = [label for _, _, label in TOKEN_BINS]
+    
     for dim in dimensions:
         st.sidebar.subheader(f"{dim.capitalize()} 配比")
         # 获取该维度的唯一值（按正确顺序排列）
@@ -380,14 +418,17 @@ if 'df' in st.session_state:
             values = sorted(df['token_bin'].unique(), key=lambda x: token_bin_order.index(x) if x in token_bin_order else len(token_bin_order))
         else:
             values = sorted(df[dim].unique())
+        
         # 计算当前分布
         if dim == 'token_bin':
             current_dist = df.groupby('token_bin')['token_count'].sum() / total_tokens
         else:
             current_dist = df.groupby(dim)['token_count'].sum() / total_tokens
+        
         # 为每个类别创建输入框
         if dim not in st.session_state.target_ratios:
             st.session_state.target_ratios[dim] = {}
+        
         target_ratios[dim] = {}
         total_ratio = 0.0
         # 每行最多放 3 个输入框
@@ -409,15 +450,19 @@ if 'df' in st.session_state:
                     st.session_state.target_ratios[dim][val] = ratio
                     target_ratios[dim][val] = ratio
                     total_ratio += ratio
+        
         # 显示维度内比例和
         st.sidebar.caption(f"当前和: {total_ratio:.2%}")
         if not (0.99 <= total_ratio <= 1.01):
             st.sidebar.warning("比例和应接近100%")
+    
     # 应用配比按钮
     if st.sidebar.button("🎯 应用配比", type="primary"):
         with st.spinner("正在计算配比方案..."):
             # 从 session_state 读取最新的目标比例
             target_ratios = st.session_state.target_ratios
+            # 保存目标分布到 session state 以便后续使用
+            st.session_state.target_distribution = target_ratios
             # 运行改进的IPF求解器
             weights, actual_dist, converged = advanced_ipf_solver(
                 df, 
@@ -438,6 +483,7 @@ if 'df' in st.session_state:
                     st.sidebar.success("✅ 所有维度配比均已满足！")
                 else:
                     st.sidebar.warning("⚠️ 部分维度配比未完全满足，请检查误差报告")
+    
     # ========== 导出配置 ==========
     st.sidebar.header("📤 导出设置")
     output_path = st.sidebar.text_input("导出路径", value="./balanced_datasets")
@@ -449,112 +495,125 @@ if 'df' in st.session_state:
         else:
             with st.spinner("正在导出分片..."):
                 export_shards_parallel(st.session_state.sampled_df, output_path, shard_size, max_export_workers)
-    # ========== 右侧图表展示 ==========
-    st.header("📊 数据分布分析")
-    # 创建图表布局
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
-    col5, col6 = st.columns(2)
-    # 1. Source 配比图
-    with col1:
-        st.subheader("数据来源 (Source) 分布")
-        source_dist = calculate_distribution_cached(df, 'source')
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-    # 2. Category 配比图
-    with col2:
-        st.subheader("数据类别 (Category) 分布")
-        category_dist = calculate_distribution_cached(df, 'category')
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-    # 3. Domain 配比图
-    with col3:
-        st.subheader("数据领域 (Domain) 分布")
-        domain_dist = calculate_distribution_cached(df, 'domain')
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-    # 4. Language 配比图
-    with col4:
-        st.subheader("语言 (Language) 分布")
-        lang_dist = calculate_distribution_cached(df, 'language')
-        fig, ax = plt.subplots(figsize=(6, 4))
-        ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
-        ax.axis('equal')
-        st.pyplot(fig)
-    # 5. Token Count 配比图
-    with col5:
-        st.subheader("Token长度分布")
-        # 确保token_bin列存在
-        if 'token_bin' not in df.columns:
-            df['token_bin'] = [get_token_bin(tc) for tc in df['token_count']]
-        token_dist = calculate_distribution_cached(df, 'token_bin')
-        # 确保所有分组都存在并按正确顺序排列
-        ordered_labels = [label for _, _, label in TOKEN_BINS]
-        for label in ordered_labels:
-            if label not in token_dist:
-                token_dist[label] = 0.0
-        token_dist = token_dist.reindex(ordered_labels)
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.bar(token_dist.index, token_dist.values)
-        ax.set_ylabel('Ratio')
-        ax.set_title('Token length distribution')
-        for i, v in enumerate(token_dist.values):
-            ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
-        st.pyplot(fig)
-    # 6. 子类分布图
-    with col6:
-        st.subheader("子类组合分布 (Top 10)")
-        # 创建子类组合
-        df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
-        subclass_dist = calculate_distribution_cached(df, 'subclass')
-        # 取Top 10
-        top10 = subclass_dist.head(10)
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.barh(top10.index, top10.values)
-        ax.set_xlabel('比例')
-        ax.set_title('Top 10 distribution of subclass combinations')
-        # 添加比例标签
-        for i, v in enumerate(top10.values):
-            ax.text(v + 0.005, i, f'{v:.1%}', va='center')
-        plt.tight_layout()
-        st.pyplot(fig)
-    # 显示数据摘要
-    st.divider()
-    st.subheader("🔍 数据摘要")
-    st.write(f"**总样本数**: {len(df):,}")
-    st.write(f"**总Token数**: {total_tokens/1e9:.2f} B (10亿)")
-    st.write(f"**平均Token长度**: {total_tokens/len(df):.0f}")
-    # 如果有采样数据，显示采样质量
-    if 'sampled_df' in st.session_state:
-        st.subheader("🎯 采样质量报告")
-        sampled_df = st.session_state.sampled_df
-        sampled_tokens = sampled_df['token_count'].sum()
-        # 确保采样数据也有token_bin列
-        if 'token_bin' not in sampled_df.columns:
-            sampled_df['token_bin'] = [get_token_bin(tc) for tc in sampled_df['token_count']]
-        st.write(f"**采样总量**: {sampled_tokens/1e9:.2f} B tokens")
-        st.write(f"**采样比例**: {len(sampled_df)/len(df):.1%}")
-        # 比较关键维度
-        st.subheader("📈 配比对比分析")
-        comparison_cols = st.columns(len(['language', 'domain', 'category', 'token_bin']))
-        for i, dim in enumerate(['language', 'domain', 'category', 'token_bin']):
-            with comparison_cols[i]:
-                orig_dist = calculate_distribution_cached(df, dim)
-                sampled_dist = calculate_distribution_cached(sampled_df, dim)
-                # 计算最大误差
-                max_error = 0
-                for cat in orig_dist.index:
-                    orig = orig_dist.get(cat, 0)
-                    sampled = sampled_dist.get(cat, 0)
-                    error = abs(orig - sampled)
-                    max_error = max(max_error, error)
-                st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
+
+# ========== 右侧图表展示 ==========
+st.header("📊 数据分布分析")
+# 创建图表布局
+col1, col2 = st.columns(2)
+col3, col4 = st.columns(2)
+col5, col6 = st.columns(2)
+
+# 1. Source 配比图
+with col1:
+    st.subheader("数据来源 (Source) 分布")
+    source_dist = calculate_distribution_cached(df, 'source')
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')
+    st.pyplot(fig)
+
+# 2. Category 配比图
+with col2:
+    st.subheader("数据类别 (Category) 分布")
+    category_dist = calculate_distribution_cached(df, 'category')
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')
+    st.pyplot(fig)
+
+# 3. Domain 配比图
+with col3:
+    st.subheader("数据领域 (Domain) 分布")
+    domain_dist = calculate_distribution_cached(df, 'domain')
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')
+    st.pyplot(fig)
+
+# 4. Language 配比图
+with col4:
+    st.subheader("语言 (Language) 分布")
+    lang_dist = calculate_distribution_cached(df, 'language')
+    fig, ax = plt.subplots(figsize=(6, 4))
+    ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
+    ax.axis('equal')
+    st.pyplot(fig)
+
+# 5. Token Count 配比图
+with col5:
+    st.subheader("Token长度分布")
+    # 确保token_bin列存在
+    if 'token_bin' not in df.columns:
+        df['token_bin'] = [get_token_bin(tc) for tc in df['token_count']]
+    token_dist = calculate_distribution_cached(df, 'token_bin')
+    # 确保所有分组都存在并按正确顺序排列
+    ordered_labels = [label for _, _, label in TOKEN_BINS]
+    for label in ordered_labels:
+        if label not in token_dist:
+            token_dist[label] = 0.0
+    token_dist = token_dist.reindex(ordered_labels)
+    fig, ax = plt.subplots(figsize=(8, 4))
+    ax.bar(token_dist.index, token_dist.values)
+    ax.set_ylabel('Ratio')
+    ax.set_title('Token length distribution')
+    for i, v in enumerate(token_dist.values):
+        ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
+    st.pyplot(fig)
+
+# 6. 子类分布图
+with col6:
+    st.subheader("子类组合分布 (Top 10)")
+    # 创建子类组合
+    df['subclass'] = df['source'] + "+" + df['category'] + "+" + df['domain'] + "+" + df['language']
+    subclass_dist = calculate_distribution_cached(df, 'subclass')
+    # 取Top 10
+    top10 = subclass_dist.head(10)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.barh(top10.index, top10.values)
+    ax.set_xlabel('比例')
+    ax.set_title('Top 10 distribution of subclass combinations')
+    # 添加比例标签
+    for i, v in enumerate(top10.values):
+        ax.text(v + 0.005, i, f'{v:.1%}', va='center')
+    plt.tight_layout()
+    st.pyplot(fig)
+
+# 显示数据摘要
+st.divider()
+st.subheader("🔍 数据摘要")
+st.write(f"**总样本数**: {len(df):,}")
+st.write(f"**总Token数**: {total_tokens/1e9:.2f} B (10亿)")
+st.write(f"**平均Token长度**: {total_tokens/len(df):.0f}")
+
+# 如果有采样数据，显示采样质量
+if 'sampled_df' in st.session_state and 'target_distribution' in st.session_state:
+    st.subheader("🎯 采样质量报告")
+    sampled_df = st.session_state.sampled_df
+    sampled_tokens = sampled_df['token_count'].sum()
+    # 确保采样数据也有token_bin列
+    if 'token_bin' not in sampled_df.columns:
+        sampled_df['token_bin'] = [get_token_bin(tc) for tc in sampled_df['token_count']]
+    st.write(f"**采样总量**: {sampled_tokens/1e9:.2f} B tokens")
+    st.write(f"**采样比例**: {len(sampled_df)/len(df):.1%}")
+    
+    # 比较关键维度
+    st.subheader("📈 配比对比分析（与目标分布比较）")
+    comparison_cols = st.columns(len(['language', 'domain', 'category', 'token_bin']))
+    for i, dim in enumerate(['language', 'domain', 'category', 'token_bin']):
+        with comparison_cols[i]:
+            # 计算采样后的分布
+            sampled_dist = calculate_distribution_cached(sampled_df, dim)
+            # 获取目标分布
+            target_dist = st.session_state.target_distribution.get(dim, {})
+            
+            # 计算最大误差
+            max_error = 0
+            for cat, target_ratio in target_dist.items():
+                sampled_ratio = sampled_dist.get(cat, 0)
+                error = abs(sampled_ratio - target_ratio)
+                max_error = max(max_error, error)
+                
+            st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
     st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
