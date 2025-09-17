@@ -264,7 +264,7 @@ def calculate_distribution_cached(df, column, weights=None):
     """缓存版本的分布计算"""
     return calculate_distribution(df, column, weights)
 
-def advanced_ipf_solver(df, target_ratios, target_total, max_iter=20, tol=0.02):
+def advanced_ipf_solver(df, target_ratios, target_total, max_iter=100, tol=0.005):
     """
     改进的IPF求解器 - 支持多维度同时优化
     """
@@ -278,7 +278,7 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=20, tol=0.02):
             # 检查该类别在原始数据中是否存在
             if cat not in df[dim].values:
                 st.error(f"错误：维度 '{dim}' 中不存在类别 '{cat}'")
-                return None, None, False
+                return None, None, False, {}
             
             # 检查目标比例是否超过原始数据最大可能
             orig_ratio = (df[df[dim] == cat]['token_count'].sum() / total_tokens)
@@ -289,7 +289,7 @@ def advanced_ipf_solver(df, target_ratios, target_total, max_iter=20, tol=0.02):
         dim_sum = sum(targets.values())
         if not (0.99 <= dim_sum <= 1.01):
             st.error(f"错误：维度 '{dim}' 的目标比例和({dim_sum:.2%})不在[99%, 101%]范围内")
-            return None, None, False
+            return None, None, False, {}
     
     # 开始IPF迭代
     converged_dims = set()  # 记录已收敛的维度
@@ -545,7 +545,7 @@ def parse_jsonl_file_pandas(file_path, chunksize=50000):
 
 # ========== 左侧配置栏 ==========
 st.sidebar.header("🔧 配置面板")
-data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
+data_path = st.sidebar.text_input("数据集文件夹路径", value="./test_data")
 
 # 数据处理模式选择
 processing_mode = st.sidebar.radio(
@@ -562,7 +562,13 @@ if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
     
     if data_path and os.path.exists(data_path):
         st.sidebar.success("✅ 路径存在")
-        st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
+        try:
+            items = os.listdir(data_path)
+            st.sidebar.info(f"包含 {len(items)} 个项目")
+            jsonl_files = [f for f in items if f.lower().endswith('.jsonl')]
+            st.sidebar.info(f"其中 {len(jsonl_files)} 个JSONL文件")
+        except Exception as e:
+            st.sidebar.warning(f"无法列出目录内容: {str(e)}")
     else:
         st.sidebar.error("❌ 路径不存在或无效")
 
@@ -572,6 +578,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
         st.sidebar.error("❌ 请先输入路径")
     else:
         data_path = os.path.normpath(data_path)
+        st.sidebar.info(f"正在处理路径: {data_path}")
         
         with st.spinner("🔍 正在扫描数据集文件..."):
             try:
@@ -617,7 +624,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                         # 存储到session state
                         st.session_state.df = df
                         st.session_state.total_tokens = total_tokens
-                        st.session_state.processing_mode = "memory"
+                        st.session_state.processing_mode = "内存"
                         
                         st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
                     else:
@@ -643,7 +650,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                     # 存储到session state
                     st.session_state.sampler = sampler
                     st.session_state.stats = stats
-                    st.session_state.processing_mode = "streaming"
+                    st.session_state.processing_mode = "流式"
                     
                     st.sidebar.success(f"🎉 统计完成！共 {stats['total_samples']:,} 个样本，{stats['total_tokens']/1e9:.2f}B tokens")
                     
@@ -972,7 +979,7 @@ if 'processing_mode' in st.session_state:
                     if dim in final_errors:
                         # 使用IPF求解器计算出的准确误差
                         error = final_errors[dim]
-                        st.metric(f"{dim.capitalize()}", f"{error:.1%}", "最大误差")
+                        st.metric(f"{dim.capitalize()}", f"{error*100:.1f}%", "最大误差")
                     else:
                         # 备用计算方法
                         orig_dist = calculate_distribution_cached(df, dim)
@@ -986,7 +993,7 @@ if 'processing_mode' in st.session_state:
                             error = abs(orig - sampled)
                             max_error = max(max_error, error)
                         
-                        st.metric(f"{dim.capitalize()}", f"{max_error:.1%}", "最大误差")
+                        st.metric(f"{dim.capitalize()}", f"{max_error*100:.1f}%", "最大误差")
     else:
         # 流式模式的统计信息展示
         stats = st.session_state.stats
