@@ -4,6 +4,8 @@ import numpy as np
 import json
 import os
 import glob
+import matplotlib
+matplotlib.use('Agg')  # <-- 强制使用非交互式后端
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 import math
@@ -508,80 +510,86 @@ if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
 
 # 加载数据按钮
 if st.sidebar.button("📁 加载数据集", type="primary"):
+    st.write("DEBUG: Load button clicked") # <-- 调试信息
     if not data_path:
         st.sidebar.error("❌ 请先输入路径")
     else:
         data_path = os.path.normpath(data_path)
         st.sidebar.info(f"正在处理路径: {data_path}")
-        with st.spinner("🔍 正在扫描数据集文件..."):
-            try:
-                if st.session_state.processing_mode == "内存模式（小数据）":
-                    # 原有的内存模式处理
-                    jsonl_files = []
-                    for root, _, files in os.walk(data_path):
-                        for file in files:
-                            if file.lower().endswith('.jsonl'):
-                                jsonl_files.append(os.path.join(root, file))
-                    st.sidebar.info(f"📁 找到 {len(jsonl_files)} 个JSONL文件")
-                    if not jsonl_files:
-                        st.sidebar.warning("⚠️ 未找到JSONL文件，请检查：")
-                        st.sidebar.caption("- 路径是否正确")
-                        st.sidebar.caption("- 文件后缀是否为.jsonl（非.JSONL）")
-                        st.sidebar.caption("- 是否有文件访问权限")
-                        st.stop()
-                    # 并行读取所有JSONL文件（使用pandas优化版本）
-                    all_data = []
-                    progress_bar = st.sidebar.progress(0)
-                    status_text = st.sidebar.empty()
-                    # 使用线程池并行处理文件
-                    with ThreadPoolExecutor(max_workers=8) as executor:
-                        future_to_file = {executor.submit(parse_jsonl_file_pandas, file, 50000): file for file in jsonl_files}
-                        for i, future in enumerate(as_completed(future_to_file)):
-                            result = future.result()
-                            all_data.extend(result)
-                            status_text.text(f"✅ 已处理 {i+1}/{len(jsonl_files)} 个文件")
-                            progress_bar.progress((i + 1) / len(jsonl_files))
-                    progress_bar.empty()
-                    status_text.empty()
-                    if all_data:
-                        # 转为DataFrame
-                        df = pd.DataFrame(all_data)
-                        total_tokens = df['token_count'].sum()
-                        # 存储到session state
-                        st.session_state.df = df
-                        st.session_state.total_tokens = total_tokens
-                        # st.session_state.processing_mode = "内存" # 旧的不一致的值
-                        st.session_state.processing_mode = "内存模式（小数据）" # 新的，与 radio 选项一致的值
-                        st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
-                    else:
-                        st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
-                        st.sidebar.info("有效JSONL样本示例:")
-                        st.sidebar.code('''{"source": "CCI4", "category": "book", "domain": "science", "language": "CN", "token_count": 1234, "text": "示例文本..."}''')
-                        st.stop()
-                else:  # 流式模式 (st.session_state.processing_mode == "流式模式（大数据）")
-                    # 大数据流式处理
-                    sampler = LargeDataSampler(data_path)
-                    file_count = sampler.scan_files()
-                    st.sidebar.info(f"📁 找到 {file_count} 个JSONL文件")
-                    if file_count == 0:
-                        st.sidebar.warning("⚠️ 未找到JSONL文件，请检查路径")
-                        st.stop()
-                    # 计算统计信息
-                    stats = sampler.calculate_statistics()
+        # --- 简化 st.spinner 内容进行测试 ---
+        # with st.spinner("🔍 正在扫描数据集文件..."):
+        try:
+            st.write("DEBUG: Inside try block") # <-- 调试信息
+            if st.session_state.processing_mode == "内存模式（小数据）":
+                st.write("DEBUG: Memory mode selected") # <-- 调试信息
+                # 原有的内存模式处理
+                jsonl_files = []
+                for root, _, files in os.walk(data_path):
+                    for file in files:
+                        if file.lower().endswith('.jsonl'):
+                            jsonl_files.append(os.path.join(root, file))
+                st.sidebar.info(f"📁 找到 {len(jsonl_files)} 个JSONL文件")
+                if not jsonl_files:
+                    st.sidebar.warning("⚠️ 未找到JSONL文件，请检查：")
+                    st.sidebar.caption("- 路径是否正确")
+                    st.sidebar.caption("- 文件后缀是否为.jsonl（非.JSONL）")
+                    st.sidebar.caption("- 是否有文件访问权限")
+                    st.stop()
+                # 并行读取所有JSONL文件（使用pandas优化版本）
+                all_data = []
+                progress_bar = st.sidebar.progress(0)
+                status_text = st.sidebar.empty()
+                # 使用线程池并行处理文件
+                with ThreadPoolExecutor(max_workers=8) as executor:
+                    future_to_file = {executor.submit(parse_jsonl_file_pandas, file, 50000): file for file in jsonl_files}
+                    for i, future in enumerate(as_completed(future_to_file)):
+                        result = future.result()
+                        all_data.extend(result)
+                        status_text.text(f"✅ 已处理 {i+1}/{len(jsonl_files)} 个文件")
+                        progress_bar.progress((i + 1) / len(jsonl_files))
+                progress_bar.empty()
+                status_text.empty()
+                if all_data:
+                    # 转为DataFrame
+                    df = pd.DataFrame(all_data)
+                    total_tokens = df['token_count'].sum()
                     # 存储到session state
-                    st.session_state.sampler = sampler
-                    st.session_state.stats = stats
-                    # st.session_state.processing_mode = "流式" # 旧的不一致的值
-                    st.session_state.processing_mode = "流式模式（大数据）" # 新的，与 radio 选项一致的值
-                    st.sidebar.success(f"🎉 统计完成！共 {stats['total_samples']:,} 个样本，{stats['total_tokens']/1e9:.2f}B tokens")
-            except Exception as e:
-                st.sidebar.exception(f"_fatal error_: {str(e)}")
-                st.stop()
+                    st.session_state.df = df
+                    st.session_state.total_tokens = total_tokens
+                    # st.session_state.processing_mode = "内存" # 旧的不一致的值
+                    st.session_state.processing_mode = "内存模式（小数据）" # 新的，与 radio 选项一致的值
+                    st.sidebar.success(f"🎉 加载成功！共 {len(df):,} 个有效样本，{total_tokens/1e9:.2f}B tokens")
+                else:
+                    st.sidebar.error("❌ 未找到有效数据，请检查文件格式")
+                    st.sidebar.info("有效JSONL样本示例:")
+                    st.sidebar.code('''{"source": "CCI4", "category": "book", "domain": "science", "language": "CN", "token_count": 1234, "text": "示例文本..."}''')
+                    st.stop()
+            else:  # 流式模式 (st.session_state.processing_mode == "流式模式（大数据）")
+                st.write("DEBUG: Streaming mode selected") # <-- 调试信息
+                # 大数据流式处理
+                sampler = LargeDataSampler(data_path)
+                file_count = sampler.scan_files()
+                st.sidebar.info(f"📁 找到 {file_count} 个JSONL文件")
+                if file_count == 0:
+                    st.sidebar.warning("⚠️ 未找到JSONL文件，请检查路径")
+                    st.stop()
+                # 计算统计信息
+                stats = sampler.calculate_statistics()
+                # 存储到session state
+                st.session_state.sampler = sampler
+                st.session_state.stats = stats
+                # st.session_state.processing_mode = "流式" # 旧的不一致的值
+                st.session_state.processing_mode = "流式模式（大数据）" # 新的，与 radio 选项一致的值
+                st.sidebar.success(f"🎉 统计完成！共 {stats['total_samples']:,} 个样本，{stats['total_tokens']/1e9:.2f}B tokens")
+        except Exception as e:
+            st.sidebar.exception(f"_fatal error_: {str(e)}")
+            st.stop()
 
 # 检查数据是否已加载
 # 使用更明确的条件检查
 if ('df' in st.session_state and st.session_state.processing_mode == "内存模式（小数据）") or \
    ('sampler' in st.session_state and st.session_state.processing_mode == "流式模式（大数据）"):
+    st.write("DEBUG: Data loaded, proceeding to UI") # <-- 调试信息
     # ========== 配比调整配置 ==========
     st.sidebar.header("⚖️ 配比调整")
     # 目标总量输入
@@ -688,8 +696,10 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
                 st.sidebar.warning("比例和应接近100%")
     # 应用配比按钮
     if st.sidebar.button("🎯 应用配比", type="primary"):
+        st.write("DEBUG: Apply ratio button clicked") # <-- 调试信息
         if st.session_state.processing_mode == "内存模式（小数据）": # 修改判断条件
-            with st.spinner("正在计算配比方案..."):
+            # with st.spinner("正在计算配比方案..."): # <-- 暂时移除spinner测试
+            try:
                 # 从 session_state 读取最新的目标比例
                 target_ratios = st.session_state.target_ratios
                 # 运行改进的IPF求解器
@@ -713,8 +723,12 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
                         st.sidebar.success("✅ 所有维度配比均已满足！")
                     else:
                         st.sidebar.warning("⚠️ 部分维度配比未完全满足，请检查误差报告")
+            except Exception as e:
+                 st.sidebar.error(f"应用配比时出错: {str(e)}")
+                 st.stop()
         else:  # streaming mode (st.session_state.processing_mode == "流式模式（大数据）")
-            with st.spinner("正在流式采样大数据集..."):
+            # with st.spinner("正在流式采样大数据集..."): # <-- 暂时移除spinner测试
+            try:
                 sampler = st.session_state.sampler
                 target_ratios = st.session_state.target_ratios
                 # 获取输出路径
@@ -728,6 +742,9 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
                     shard_size
                 )
                 st.sidebar.success(f"流式采样完成！共写入 {total_written/1e9:.2f}B tokens")
+            except Exception as e:
+                 st.sidebar.error(f"流式采样时出错: {str(e)}")
+                 st.stop()
     # ========== 导出配置 ==========
     st.sidebar.header("📤 导出设置")
     output_path = st.sidebar.text_input("导出路径", value="./balanced_datasets")
@@ -738,8 +755,12 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
              if 'sampled_df' not in st.session_state:
                  st.sidebar.error("请先应用配比方案")
              else:
-                 with st.spinner("正在导出分片..."):
+                 # with st.spinner("正在导出分片..."): # <-- 暂时移除spinner测试
+                 try:
                      export_shards_parallel(st.session_state.sampled_df, output_path, shard_size, max_export_workers)
+                 except Exception as e:
+                     st.sidebar.error(f"导出时出错: {str(e)}")
+                     st.stop()
         else: # 流式模式
              st.sidebar.warning("流式模式下数据已直接写入磁盘，请查看输出路径。") # 给用户提示
     # ========== 右侧图表展示 ==========
@@ -763,6 +784,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
             ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
             st.pyplot(fig)
+            plt.close(fig)  # <-- 关闭图形
         # 2. Category 配比图
         with col2:
             st.subheader("数据类别 (Category) 分布")
@@ -771,6 +793,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
             ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
             st.pyplot(fig)
+            plt.close(fig) # <-- 关闭图形
         # 3. Domain 配比图
         with col3:
             st.subheader("数据领域 (Domain) 分布")
@@ -779,6 +802,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
             ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
             st.pyplot(fig)
+            plt.close(fig) # <-- 关闭图形
         # 4. Language 配比图
         with col4:
             st.subheader("语言 (Language) 分布")
@@ -787,6 +811,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
             ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
             ax.axis('equal')
             st.pyplot(fig)
+            plt.close(fig) # <-- 关闭图形
         # 5. Token Count 配比图
         with col5:
             st.subheader("Token长度分布")
@@ -804,6 +829,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
             for i, v in enumerate(token_dist.values):
                 ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
             st.pyplot(fig)
+            plt.close(fig) # <-- 关闭图形
         # 6. 子类分布图
         with col6:
             st.subheader("子类组合分布 (Top 10)")
@@ -821,6 +847,7 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
                 ax.text(v + 0.005, i, f'{v:.1%}', va='center')
             plt.tight_layout()
             st.pyplot(fig)
+            plt.close(fig) # <-- 关闭图形
         # 显示数据摘要
         st.divider()
         st.subheader("🔍 数据摘要")
@@ -881,4 +908,4 @@ if ('df' in st.session_state and st.session_state.processing_mode == "内存模�
                     st.write(f"  ... 还有 {len(dist_data) - 10} 个类别")
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
-    st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
+    # st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300) # <-- 暂时移除图片测试
