@@ -15,6 +15,16 @@ import math
 import dask.dataframe as dd
 from dask import delayed
 import gc
+from dask.distributed import Client
+import psutil
+
+# 配置Dask调度器
+try:
+    client = Client(processes=False, threads_per_worker=4, n_workers=2, memory_limit='4GB')
+    st.sidebar.success("✅ Dask调度器已启动")
+except Exception as e:
+    st.sidebar.warning(f"⚠️ Dask调度器启动失败: {str(e)}")
+    client = None
 
 # 配置页面
 st.set_page_config(layout="wide", page_title="数据配比工具")
@@ -57,6 +67,34 @@ def calculate_distribution_cached(df_path, column):
     total_tokens = df['token_count'].sum().compute()
     dist = df.groupby(column)['token_count'].sum().compute() / total_tokens
     return dist.sort_values(ascending=False)
+
+# ========== 全局分布计算函数 ==========
+@st.cache_data(ttl=3600)
+def compute_global_distribution(df_paths, dimensions):
+    """使用 Dask 计算所有维度的确切分布"""
+    st.info("🔄 正在计算全局分布...")
+    
+    # 初始化各维度的统计结果
+    results = {}
+    
+    # 合并所有文件为一个 Dask DataFrame
+    ddf_list = [dd.read_json(path, lines=True) for path in df_paths]
+    combined_ddf = dd.concat(ddf_list, interleave_partitions=True)
+    
+    # 添加 token_bin 列
+    combined_ddf['token_bin'] = combined_ddf['token_count'].apply(get_token_bin, meta=('token_bin', 'object'))
+    
+    # 总 token 数
+    total_tokens = delayed(sum)([ddf['token_count'].sum() for ddf in ddf_list])
+    total_tokens = total_tokens.compute()
+    
+    # 对每个维度进行分组统计
+    for dim in dimensions:
+        dist = combined_ddf.groupby(dim)['token_count'].sum().compute() / total_tokens
+        results[dim] = dist.sort_values(ascending=False)
+    
+    st.success("✅ 全局分布计算完成！")
+    return results, total_tokens
 
 def advanced_ipf_solver_chunked(df_paths, target_ratios, target_total, priority_order, max_iter=100, tol=0.005):
     """
@@ -593,9 +631,10 @@ if 'df_paths' in st.session_state:
     # ========== 右侧图表展示 ==========
     st.header("📊 数据分布分析")
     
-    # 由于数据量大，只基于采样文件进行分析
-    sample_files = df_paths[:min(3, len(df_paths))]
-    
+    # 调用全局分布计算
+    with st.spinner("🔍 正在分析全局分布..."):
+        global_dist, actual_total_tokens = compute_global_distribution(df_paths, dimensions)
+
     col1, col2 = st.columns(2)
     col3, col4 = st.columns(2)
     col5, col6 = st.columns(2)
@@ -604,18 +643,11 @@ if 'df_paths' in st.session_state:
     with col1:
         st.subheader("数据来源 (Source) 分布")
         try:
-            source_data = []
-            for file_path in sample_files:
-                df_sample = dd.read_json(file_path, lines=True)
-                source_data.append(df_sample)
-            if source_data:
-                combined_df = dd.concat(source_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                source_dist = combined_df.groupby('source')['token_count'].sum().compute() / total_tokens
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
-                ax.axis('equal')
-                st.pyplot(fig)
+            source_dist = global_dist['source']
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
+            ax.axis('equal')
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
@@ -623,18 +655,11 @@ if 'df_paths' in st.session_state:
     with col2:
         st.subheader("数据类别 (Category) 分布")
         try:
-            category_data = []
-            for file_path in sample_files:
-                df_sample = dd.read_json(file_path, lines=True)
-                category_data.append(df_sample)
-            if category_data:
-                combined_df = dd.concat(category_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                category_dist = combined_df.groupby('category')['token_count'].sum().compute() / total_tokens
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
-                ax.axis('equal')
-                st.pyplot(fig)
+            category_dist = global_dist['category']
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
+            ax.axis('equal')
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
@@ -642,18 +667,11 @@ if 'df_paths' in st.session_state:
     with col3:
         st.subheader("数据领域 (Domain) 分布")
         try:
-            domain_data = []
-            for file_path in sample_files:
-                df_sample = dd.read_json(file_path, lines=True)
-                domain_data.append(df_sample)
-            if domain_data:
-                combined_df = dd.concat(domain_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                domain_dist = combined_df.groupby('domain')['token_count'].sum().compute() / total_tokens
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
-                ax.axis('equal')
-                st.pyplot(fig)
+            domain_dist = global_dist['domain']
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
+            ax.axis('equal')
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
@@ -661,18 +679,11 @@ if 'df_paths' in st.session_state:
     with col4:
         st.subheader("语言 (Language) 分布")
         try:
-            language_data = []
-            for file_path in sample_files:
-                df_sample = dd.read_json(file_path, lines=True)
-                language_data.append(df_sample)
-            if language_data:
-                combined_df = dd.concat(language_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                lang_dist = combined_df.groupby('language')['token_count'].sum().compute() / total_tokens
-                fig, ax = plt.subplots(figsize=(6, 4))
-                ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
-                ax.axis('equal')
-                st.pyplot(fig)
+            lang_dist = global_dist['language']
+            fig, ax = plt.subplots(figsize=(6, 4))
+            ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
+            ax.axis('equal')
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
@@ -680,35 +691,26 @@ if 'df_paths' in st.session_state:
     with col5:
         st.subheader("Token长度分布")
         try:
-            token_data = []
-            for file_path in sample_files:
-                df_sample = dd.read_json(file_path, lines=True)
-                df_sample['token_bin'] = df_sample['token_count'].apply(get_token_bin, meta=('token_bin', 'object'))
-                token_data.append(df_sample)
-            if token_data:
-                combined_df = dd.concat(token_data)
-                total_tokens = combined_df['token_count'].sum().compute()
-                token_dist = combined_df.groupby('token_bin')['token_count'].sum().compute() / total_tokens
-                
-                ordered_labels = [label for _, _, label in TOKEN_BINS]
-                dist_values = [token_dist.get(label, 0) for label in ordered_labels]
-                
-                fig, ax = plt.subplots(figsize=(8, 4))
-                ax.bar(ordered_labels, dist_values)
-                ax.set_ylabel('Ratio')
-                ax.set_title('Token length distribution')
-                for i, v in enumerate(dist_values):
-                    ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
-                st.pyplot(fig)
+            token_dist = global_dist['token_bin']
+            ordered_labels = [label for _, _, label in TOKEN_BINS]
+            dist_values = [token_dist.get(label, 0) for label in ordered_labels]
+
+            fig, ax = plt.subplots(figsize=(8, 4))
+            ax.bar(ordered_labels, dist_values)
+            ax.set_ylabel('Ratio')
+            ax.set_title('Token length distribution')
+            for i, v in enumerate(dist_values):
+                ax.text(i, v + 0.01, f'{v:.1%}', ha='center')
+            st.pyplot(fig)
         except Exception as e:
             st.error(f"绘图出错: {str(e)}")
     
-    # 6. 子类分布图
+    # 6. 子类组合分布图
     with col6:
         st.subheader("子类组合分布 (Top 10)")
         try:
             subclass_data = []
-            for file_path in sample_files:
+            for file_path in df_paths[:min(3, len(df_paths))]:  # 控制采样数量
                 df_sample = dd.read_json(file_path, lines=True)
                 df_sample['subclass'] = df_sample['source'] + "+" + df_sample['category'] + "+" + df_sample['domain'] + "+" + df_sample['language']
                 subclass_data.append(df_sample)
@@ -733,9 +735,16 @@ if 'df_paths' in st.session_state:
     st.divider()
     st.subheader("🔍 数据摘要")
     st.write(f"**文件数量**: {len(df_paths)}")
-    if estimated_total_tokens > 0:
-        st.write(f"**估算总Token数**: {estimated_total_tokens/1e9:.2f} B (10亿)")
+    st.write(f"**实际总Token数**: {actual_total_tokens / 1e9:.2f} B (10亿)")
     
 else:
     st.info("👈 请在左侧输入数据集路径并点击'加载数据集'")
     st.image("https://docs.streamlit.io/images/brand/streamlit-mark-color.png", width=300)
+
+# 内存监控
+if st.sidebar.checkbox("🔍 显示内存使用情况"):
+    process = psutil.Process(os.getpid())
+    memory_info = process.memory_info()
+    st.sidebar.info(f"当前内存使用: {memory_info.rss / 1024 / 1024:.2f} MB")
+    if client:
+        st.sidebar.info(f"Dask集群状态: {client.dashboard_link}")
