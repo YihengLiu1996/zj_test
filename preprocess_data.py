@@ -37,95 +37,165 @@ def detect_language(text):
 # ========================
 def split_markdown_by_headings_tokenized(md_content, tokenizer, threshold_tokens=15000):
     """
-    Split markdown by headings, then by token count (not char count).
-    Preserves LaTeX formulas as atomic units.
-    Then greedily merge segments to form chunks as close as possible to threshold_tokens (without exceeding).
+    三级按需切分 + 贪心合并，保留顺序，最小破坏结构。
     """
+    # ============= 第0阶段：整体判断 =============
+    all_tokens = tokenizer.encode(md_content, add_special_tokens=False)
+    if len(all_tokens) <= threshold_tokens:
+        return [md_content]  # 整体不超限，直接返回
+
+    # ============= 第一阶段：按标题切分 =============
     lines = md_content.splitlines(keepends=True)
-    chunks = []
+    heading_chunks = []
     current_chunk = []
 
-    # 第一阶段：按标题切分
     for line in lines:
         if line.lstrip().startswith('#'):
             if current_chunk:
-                chunks.append(''.join(current_chunk))
+                heading_chunks.append(''.join(current_chunk))
                 current_chunk = []
             current_chunk.append(line)
         else:
             current_chunk.append(line)
     if current_chunk:
-        chunks.append(''.join(current_chunk))
+        heading_chunks.append(''.join(current_chunk))
 
-    # 第二阶段：对每个 chunk 拆分成 segments（公式保护）
-    all_segments = []
-    for chunk in chunks:
-        segments = []
-        pos = 0
-        chunk_len = len(chunk)
-        while pos < chunk_len:
-            # 查找下一个 LaTeX 公式（$...$ 或 $$...$$）
-            inline_match = re.search(r'\$[^$].*?\$', chunk[pos:], re.DOTALL)
-            block_match = re.search(r'\$\$.*?\$\$', chunk[pos:], re.DOTALL)
+    # ============= 第二阶段：对超限标题块，按段落切分 =============
+    paragraph_level_chunks = []
 
-            matches = []
-            if inline_match:
-                matches.append((inline_match.start() + pos, inline_match.end() + pos, inline_match.group()))
-            if block_match:
-                matches.append((block_match.start() + pos, block_match.end() + pos, block_match.group()))
+    for h_chunk in heading_chunks:
+        h_tokens = tokenizer.encode(h_chunk, add_special_tokens=False)
+        if len(h_tokens) <= threshold_tokens:
+            # 标题块不超限，保留
+            paragraph_level_chunks.append(h_chunk)
+        else:
+            # 超限 → 按段落切
+            paragraphs = re.split(r'(\n\s*\n)', h_chunk)  # 保留分隔符
+            current_para = ""
+            para_list = []
 
-            if matches:
-                # 取最早出现的公式
-                start, end, formula = min(matches, key=lambda x: x[0])
-                # 添加公式前的文本
-                if start > pos:
-                    segments.append(chunk[pos:start])
-                # 添加公式（作为原子单元）
-                segments.append(formula)
-                pos = end
-            else:
-                # 无公式，添加剩余文本
-                segments.append(chunk[pos:])
-                break
-        all_segments.extend(segments)
+            for part in paragraphs:
+                if re.fullmatch(r'\n\s*\n', part):
+                    if current_para.strip():
+                        para_list.append(current_para)
+                        current_para = ""
+                    para_list.append(part)  # 保留空行
+                else:
+                    current_para += part
 
-    # 第三阶段：贪心合并 segments，使每个块尽可能接近 threshold_tokens
+            if current_para.strip():
+                para_list.append(current_para)
+
+            # 检查每个段落块是否超限
+            for p_chunk in para_list:
+                p_tokens = tokenizer.encode(p_chunk, add_special_tokens=False)
+                if len(p_tokens) <= threshold_tokens:
+                    paragraph_level_chunks.append(p_chunk)
+                else:
+                    # 仍超限 → 进入第三级：按 token + 公式保护 切分
+                    fine_segments = _split_by_token_with_formula_protection(p_chunk, tokenizer, threshold_tokens)
+                    paragraph_level_chunks.extend(fine_segments)
+
+    # ============= 第三阶段：贪心合并所有块 =============
     final_chunks = []
-    current_chunk_segments = []
+    current_merged = []
     current_token_count = 0
 
-    for seg in all_segments:
+    for seg in paragraph_level_chunks:
         seg_tokens = tokenizer.encode(seg, add_special_tokens=False)
         seg_token_len = len(seg_tokens)
 
-        # 如果当前段单独就超过阈值 → 单独成块（即使超限，也保留完整性，特别是公式）
+        # 如果当前段单独超限（如超长公式）→ 单独成块
         if seg_token_len > threshold_tokens:
-            # 先提交当前块（如果有）
-            if current_chunk_segments:
-                final_chunks.append(''.join(current_chunk_segments))
-                current_chunk_segments = []
+            if current_merged:
+                final_chunks.append(''.join(current_merged))
+                current_merged = []
                 current_token_count = 0
-            # 再提交这个超大段（即使超限）
             final_chunks.append(seg)
             continue
 
-        # 尝试加入当前块
+        # 尝试合并到当前块
         if current_token_count + seg_token_len <= threshold_tokens:
-            current_chunk_segments.append(seg)
+            current_merged.append(seg)
             current_token_count += seg_token_len
         else:
-            # 当前块满了，提交
-            if current_chunk_segments:
-                final_chunks.append(''.join(current_chunk_segments))
-            # 开启新块，放入当前段
-            current_chunk_segments = [seg]
+            # 当前块已满，提交
+            if current_merged:
+                final_chunks.append(''.join(current_merged))
+            # 开新块
+            current_merged = [seg]
             current_token_count = seg_token_len
 
-    # 提交最后一个块
-    if current_chunk_segments:
-        final_chunks.append(''.join(current_chunk_segments))
+    # 提交最后一块
+    if current_merged:
+        final_chunks.append(''.join(current_merged))
 
     return final_chunks
+
+
+def _split_by_token_with_formula_protection(text, tokenizer, max_tokens):
+    """
+    在 text 内部按 token 长度切分，保护公式不被切断。
+    返回切分后的子块列表（每个子块 token 数 ≤ max_tokens）
+    """
+    segments = []
+    pos = 0
+    text_len = len(text)
+
+    # Step 1: 按公式切分成 segments（公式作为原子单元）
+    while pos < text_len:
+        inline_match = re.search(r'\$[^$].*?\$', text[pos:], re.DOTALL)
+        block_match = re.search(r'\$\$.*?\$\$', text[pos:], re.DOTALL)
+
+        matches = []
+        if inline_match:
+            matches.append((inline_match.start() + pos, inline_match.end() + pos, inline_match.group()))
+        if block_match:
+            matches.append((block_match.start() + pos, block_match.end() + pos, block_match.group()))
+
+        if matches:
+            start, end, formula = min(matches, key=lambda x: x[0])
+            if start > pos:
+                segments.append(text[pos:start])
+            segments.append(formula)
+            pos = end
+        else:
+            segments.append(text[pos:])
+            break
+
+    # Step 2: 按 token 合并 segments，不超过 max_tokens
+    chunks = []
+    current_chunk = ""
+    current_token_count = 0
+
+    for seg in segments:
+        seg_tokens = tokenizer.encode(seg, add_special_tokens=False)
+        seg_len = len(seg_tokens)
+
+        # 如果是公式且单独超限 → 单独成块
+        if (seg.startswith('$') or seg.startswith('$$')) and seg_len > max_tokens:
+            if current_chunk.strip():
+                chunks.append(current_chunk)
+                current_chunk = ""
+                current_token_count = 0
+            chunks.append(seg)
+            continue
+
+        # 尝试加入当前块
+        if current_token_count + seg_len <= max_tokens:
+            current_chunk += seg
+            current_token_count += seg_len
+        else:
+            # 当前块满了
+            if current_chunk.strip():
+                chunks.append(current_chunk)
+            current_chunk = seg
+            current_token_count = seg_len
+
+    if current_chunk.strip():
+        chunks.append(current_chunk)
+
+    return chunks
 
 
 # ========================
