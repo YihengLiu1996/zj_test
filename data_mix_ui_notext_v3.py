@@ -548,27 +548,25 @@ def load_dataset_parallel(data_path):
 st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
 
-# 添加路径诊断工具
-if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
-    st.sidebar.subheader("路径诊断")
-    abs_path = os.path.abspath(data_path) if data_path else ""
-    st.sidebar.code(f"绝对路径: {abs_path}")
-    if data_path and os.path.exists(data_path):
-        st.sidebar.success("✅ 路径存在")
-        st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
-    else:
-        st.sidebar.error("❌ 路径不存在或无效")
+# 直接显示路径诊断（不再用 checkbox 包装）
+st.sidebar.subheader("🔍 路径诊断")
+abs_path = os.path.abspath(data_path) if data_path else ""
+st.sidebar.code(f"绝对路径: {abs_path}")
+if data_path and os.path.exists(data_path):
+    st.sidebar.success("✅ 路径存在")
+    st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
+else:
+    st.sidebar.error("❌ 路径不存在或无效")
 
-# 加载数据按钮
+# 加载数据按钮（直接使用 button 返回值，不依赖其他 widget 状态）
 if st.sidebar.button("📁 加载数据集", type="primary"):
     if not data_path:
         st.sidebar.error("❌ 请先输入路径")
     else:
-        # 关键修复：规范化路径（解决Windows大小写问题）
+        # 关键修复：规范化路径
         data_path = os.path.normpath(data_path)
         with st.spinner("🔍 正在扫描数据集文件..."):
             try:
-                # 调用改造后的加载函数
                 result, error = load_dataset_parallel(data_path)
                 if error:
                     st.sidebar.error(f"加载失败: {error}")
