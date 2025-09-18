@@ -39,6 +39,7 @@ def split_markdown_by_headings_tokenized(md_content, tokenizer, threshold_tokens
     """
     Split markdown by headings, then by token count (not char count).
     Preserves LaTeX formulas as atomic units.
+    Then greedily merge segments to form chunks as close as possible to threshold_tokens (without exceeding).
     """
     lines = md_content.splitlines(keepends=True)
     chunks = []
@@ -56,19 +57,13 @@ def split_markdown_by_headings_tokenized(md_content, tokenizer, threshold_tokens
     if current_chunk:
         chunks.append(''.join(current_chunk))
 
-    # 第二阶段：按 token 数进一步切分超长块
-    final_chunks = []
+    # 第二阶段：对每个 chunk 拆分成 segments（公式保护）
+    all_segments = []
     for chunk in chunks:
-        # 如果当前块 token 数小于阈值，直接保留
-        tokens = tokenizer.encode(chunk, add_special_tokens=False)
-        if len(tokens) <= threshold_tokens:
-            final_chunks.append(chunk)
-            continue
-
-        # 否则，按公式保护 + token 切分
         segments = []
         pos = 0
-        while pos < len(chunk):
+        chunk_len = len(chunk)
+        while pos < chunk_len:
             # 查找下一个 LaTeX 公式（$...$ 或 $$...$$）
             inline_match = re.search(r'\$[^$].*?\$', chunk[pos:], re.DOTALL)
             block_match = re.search(r'\$\$.*?\$\$', chunk[pos:], re.DOTALL)
@@ -92,66 +87,43 @@ def split_markdown_by_headings_tokenized(md_content, tokenizer, threshold_tokens
                 # 无公式，添加剩余文本
                 segments.append(chunk[pos:])
                 break
+        all_segments.extend(segments)
 
-        # 合并 segments 成符合 token 阈值的 chunks
-        current_sub = []
-        current_token_count = 0
+    # 第三阶段：贪心合并 segments，使每个块尽可能接近 threshold_tokens
+    final_chunks = []
+    current_chunk_segments = []
+    current_token_count = 0
 
-        for seg in segments:
-            seg_tokens = tokenizer.encode(seg, add_special_tokens=False)
-            seg_token_len = len(seg_tokens)
+    for seg in all_segments:
+        seg_tokens = tokenizer.encode(seg, add_special_tokens=False)
+        seg_token_len = len(seg_tokens)
 
-            # 情况1：当前段可加入当前块
-            if current_token_count + seg_token_len <= threshold_tokens:
-                current_sub.append(seg)
-                current_token_count += seg_token_len
+        # 如果当前段单独就超过阈值 → 单独成块（即使超限，也保留完整性，特别是公式）
+        if seg_token_len > threshold_tokens:
+            # 先提交当前块（如果有）
+            if current_chunk_segments:
+                final_chunks.append(''.join(current_chunk_segments))
+                current_chunk_segments = []
+                current_token_count = 0
+            # 再提交这个超大段（即使超限）
+            final_chunks.append(seg)
+            continue
 
-            # 情况2：当前段是公式且单独超限 → 单独成块
-            elif seg.startswith('$'):
-                if current_sub:
-                    final_chunks.append(''.join(current_sub))
-                    current_sub = []
-                    current_token_count = 0
-                final_chunks.append(seg)  # 公式单独成块，即使超限
+        # 尝试加入当前块
+        if current_token_count + seg_token_len <= threshold_tokens:
+            current_chunk_segments.append(seg)
+            current_token_count += seg_token_len
+        else:
+            # 当前块满了，提交
+            if current_chunk_segments:
+                final_chunks.append(''.join(current_chunk_segments))
+            # 开启新块，放入当前段
+            current_chunk_segments = [seg]
+            current_token_count = seg_token_len
 
-            # 情况3：当前段是普通文本且无法加入 → 切分当前段
-            else:
-                if current_sub:
-                    final_chunks.append(''.join(current_sub))
-                    current_sub = []
-                    current_token_count = 0
-
-                # 对大段普通文本按 token 切分
-                start_idx = 0
-                while start_idx < len(seg_tokens):
-                    end_idx = min(start_idx + threshold_tokens, len(seg_tokens))
-                    # 尝试在自然边界切分（换行或空格）
-                    sub_tokens = seg_tokens[start_idx:end_idx]
-                    sub_text = tokenizer.decode(sub_tokens, skip_special_tokens=True)
-
-                    # 如果还能继续切分，尝试找最后一个换行或空格
-                    if end_idx < len(seg_tokens):
-                        # 优先找换行
-                        last_newline = sub_text.rfind('\n')
-                        if last_newline != -1:
-                            # 截断到换行处
-                            sub_text_cut = sub_text[:last_newline + 1]
-                            cut_tokens = tokenizer.encode(sub_text_cut, add_special_tokens=False)
-                            end_idx = start_idx + len(cut_tokens)
-                        else:
-                            # 找空格
-                            last_space = sub_text.rfind(' ')
-                            if last_space != -1:
-                                sub_text_cut = sub_text[:last_space + 1]
-                                cut_tokens = tokenizer.encode(sub_text_cut, add_special_tokens=False)
-                                end_idx = start_idx + len(cut_tokens)
-
-                    final_chunks.append(tokenizer.decode(seg_tokens[start_idx:end_idx], skip_special_tokens=True))
-                    start_idx = end_idx
-
-        # 添加最后一块
-        if current_sub:
-            final_chunks.append(''.join(current_sub))
+    # 提交最后一个块
+    if current_chunk_segments:
+        final_chunks.append(''.join(current_chunk_segments))
 
     return final_chunks
 
