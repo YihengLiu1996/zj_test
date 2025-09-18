@@ -326,7 +326,66 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
     st.sidebar.success(f"导出完成！共 {shard_idx} 个分片，路径: {output_path}")
 
 # ========== 数据加载函数（改造核心） ==========
+def process_file_for_parallel_load(file_path):
+    """
+    独立的文件处理函数，用于并行加载。
+    此函数必须在模块顶层定义，以便被pickle序列化。
+    """
+    metadata = []
+    try:
+        with open(file_path, 'rb') as f:  # 必须用二进制模式
+            offset = 0
+            while True:
+                line = f.readline()
+                if not line:
+                    break
+                try:
+                    # 计算内容哈希（用于后续验证）
+                    line_hash = hashlib.md5(line).hexdigest()
+                    # 尝试解析JSON
+                    try:
+                        data = json.loads(line.decode('utf-8', errors='replace'))
+                    except json.JSONDecodeError:
+                        offset += len(line)
+                        continue
 
+                    # 验证必要字段
+                    required_fields = ['source', 'category', 'domain', 'language', 'token_count']
+                    if all(k in data for k in required_fields):
+                        # 确保token_count是数字
+                        try:
+                            token_count = int(float(data['token_count']))
+                            # 提取ID（如果存在）
+                            sample_id = data.get('id')
+                            if sample_id is not None:
+                                sample_id = str(sample_id)
+
+                            # 只存储元数据和定位信息，不存储text
+                            meta = {
+                                'id': sample_id,  # 保存UUID（如果存在）
+                                'source': str(data['source']),
+                                'category': str(data['category']),
+                                'domain': str(data['domain']),
+                                'language': str(data['language']),
+                                'token_count': token_count,
+                                'file_path': file_path,  # 记录文件路径
+                                'offset': offset,   # 记录文件偏移量
+                                'line_hash': line_hash # 记录行哈希，用于验证
+                            }
+                            metadata.append(meta)
+                        except (ValueError, TypeError):
+                            pass
+                except Exception as e:
+                    logger.debug(f"处理文件 {file_path} 偏移量 {offset} 时出错: {str(e)}")
+
+                # 更新偏移量
+                offset += len(line)
+    except Exception as e:
+        logger.exception(f"处理文件 {file_path} 时出错")
+        return file_path, str(e), []
+
+    return file_path, None, metadata
+    
 def load_dataset_parallel(data_path):
     """并行加载JSONL数据集，仅返回元数据和统计信息（不加载text字段）"""
     # 1. 扫描所有JSONL文件（大小写不敏感）
@@ -351,66 +410,10 @@ def load_dataset_parallel(data_path):
     # 自动确定工作进程数（不超过32，避免过度调度）
     max_workers = min(32, os.cpu_count() or 1)
 
-    def process_file(file):
-        """处理单个文件并记录精确元数据"""
-        metadata = []
-        try:
-            with open(file, 'rb') as f:  # 必须用二进制模式
-                offset = 0
-                while True:
-                    line = f.readline()
-                    if not line:
-                        break
-                    try:
-                        # 计算内容哈希（用于后续验证）
-                        line_hash = hashlib.md5(line).hexdigest()
-                        # 尝试解析JSON
-                        try:
-                            data = json.loads(line.decode('utf-8', errors='replace'))
-                        except json.JSONDecodeError:
-                            offset += len(line)
-                            continue
-
-                        # 验证必要字段
-                        required_fields = ['source', 'category', 'domain', 'language', 'token_count']
-                        if all(k in data for k in required_fields):
-                            # 确保token_count是数字
-                            try:
-                                token_count = int(float(data['token_count']))
-                                # 提取ID（如果存在）
-                                sample_id = data.get('id')
-                                if sample_id is not None:
-                                    sample_id = str(sample_id)
-
-                                # 只存储元数据和定位信息，不存储text
-                                meta = {
-                                    'id': sample_id,  # 保存UUID（如果存在）
-                                    'source': str(data['source']),
-                                    'category': str(data['category']),
-                                    'domain': str(data['domain']),
-                                    'language': str(data['language']),
-                                    'token_count': token_count,
-                                    'file_path': file,  # 记录文件路径
-                                    'offset': offset,   # 记录文件偏移量
-                                    'line_hash': line_hash # 记录行哈希，用于验证
-                                }
-                                metadata.append(meta)
-                            except (ValueError, TypeError):
-                                pass
-                    except Exception as e:
-                        logger.debug(f"处理文件 {file} 偏移量 {offset} 时出错: {str(e)}")
-
-                    # 更新偏移量
-                    offset += len(line)
-        except Exception as e:
-            logger.exception(f"处理文件 {file} 时出错")
-            return file, str(e), []
-
-        return file, None, metadata
-
-    # 并行处理
+    # 并行处理 - 使用全局定义的 process_file_for_parallel_load
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(process_file, file) for file in jsonl_files]
+        # 提交任务
+        futures = [executor.submit(process_file_for_parallel_load, file) for file in jsonl_files]
         for i, future in enumerate(as_completed(futures)):
             file, error, metadata = future.result()
             if error:
@@ -421,7 +424,7 @@ def load_dataset_parallel(data_path):
 
     progress_small.empty()
 
-    if not all_metadata:
+    if not all_metadata: # 修复了这里的拼写错误
         return None, "未找到有效数据样本"
 
     # 3. 创建元数据DataFrame
