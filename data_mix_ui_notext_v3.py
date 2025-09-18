@@ -75,17 +75,17 @@ def calculate_distribution_cached_wrapper(_df, column, weights=None):
 
 # ========== 改造后的图表函数，全部加入缓存 ==========
 @st.cache_data(show_spinner=False)
-def get_cached_pie_chart_data(_df, column, cache_key):
+def get_cached_pie_chart_data(_df, column, cache_key, data_version):
     """缓存饼图数据"""
     return calculate_distribution_cached_wrapper(_df, column)
 
 @st.cache_data(show_spinner=False)
-def get_cached_bar_chart_data(_df, column, cache_key):
+def get_cached_bar_chart_data(_df, column, cache_key, data_version):
     """缓存柱状图数据"""
     return calculate_distribution_cached_wrapper(_df, column)
 
 @st.cache_data(show_spinner=False)
-def get_cached_subclass_data(_df, cache_key):
+def get_cached_subclass_data(_df, cache_key, data_version):
     """缓存子类组合数据"""
     _df['subclass'] = _df['source'] + "+" + _df['category'] + "+" + _df['domain'] + "+" + _df['language']
     subclass_dist = calculate_distribution_cached_wrapper(_df, 'subclass')
@@ -579,6 +579,11 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
                     st.session_state.token_bins = result['token_bins']
                     st.session_state.df['token_bin'] = st.session_state.token_bins
 
+                    # 新增：递增数据版本号，使图表缓存失效
+                    if 'data_version' not in st.session_state:
+                        st.session_state.data_version = 0
+                    st.session_state.data_version += 1
+
                     st.sidebar.success(f"🎉 加载成功！共 {len(result['df']):,} 个有效样本，{result['total_tokens']/1e9:.2f}B tokens")
 
                     # 显示ID统计
@@ -753,6 +758,8 @@ if 'df' in st.session_state:
 
     # 为当前数据生成缓存键
     cache_key = get_dataframe_hash(df)
+    # 获取数据版本号
+    data_version = st.session_state.get('data_version', 0) # 新增：获取版本号
 
     # 创建图表布局
     col1, col2 = st.columns(2)
@@ -762,7 +769,7 @@ if 'df' in st.session_state:
     # 1. Source 配比图
     with col1:
         st.subheader("数据来源 (Source) 分布")
-        source_dist = get_cached_pie_chart_data(df, 'source', cache_key)
+        source_dist = get_cached_pie_chart_data(df, 'source', cache_key, data_version)
         if not source_dist.empty:
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(source_dist, labels=source_dist.index, autopct='%1.1f%%', startangle=90)
@@ -774,7 +781,7 @@ if 'df' in st.session_state:
     # 2. Category 配比图
     with col2:
         st.subheader("数据类别 (Category) 分布")
-        category_dist = get_cached_pie_chart_data(df, 'category', cache_key)
+        category_dist = get_cached_pie_chart_data(df, 'category', cache_key, data_version)
         if not category_dist.empty:
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(category_dist, labels=category_dist.index, autopct='%1.1f%%', startangle=90)
@@ -786,7 +793,7 @@ if 'df' in st.session_state:
     # 3. Domain 配比图
     with col3:
         st.subheader("数据领域 (Domain) 分布")
-        domain_dist = get_cached_pie_chart_data(df, 'domain', cache_key)
+        domain_dist = get_cached_pie_chart_data(df, 'domain', cache_key, data_version)
         if not domain_dist.empty:
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(domain_dist, labels=domain_dist.index, autopct='%1.1f%%', startangle=90)
@@ -798,7 +805,7 @@ if 'df' in st.session_state:
     # 4. Language 配比图
     with col4:
         st.subheader("语言 (Language) 分布")
-        lang_dist = get_cached_pie_chart_data(df, 'language', cache_key)
+        lang_dist = get_cached_pie_chart_data(df, 'language', cache_key, data_version)
         if not lang_dist.empty:
             fig, ax = plt.subplots(figsize=(6, 4))
             ax.pie(lang_dist, labels=lang_dist.index, autopct='%1.1f%%', startangle=90)
@@ -810,7 +817,7 @@ if 'df' in st.session_state:
     # 5. Token Count 配比图
     with col5:
         st.subheader("Token长度分布")
-        token_dist = get_cached_bar_chart_data(df, 'token_bin', cache_key)
+        token_dist = get_cached_bar_chart_data(df, 'token_bin', cache_key, data_version)
         # 确保所有分组都存在并按正确顺序排列
         ordered_labels = [label for _, _, label in TOKEN_BINS]
         for label in ordered_labels:
@@ -832,7 +839,7 @@ if 'df' in st.session_state:
     # 6. 子类分布图
     with col6:
         st.subheader("子类组合分布 (Top 10)")
-        top10 = get_cached_subclass_data(df, cache_key)
+        top10 = get_cached_subclass_data(df, cache_key, data_version)
         if not top10.empty:
             fig, ax = plt.subplots(figsize=(10, 5))
             ax.barh(top10.index, top10.values)
@@ -867,7 +874,7 @@ if 'df' in st.session_state:
         comparison_cols = st.columns(len(['language', 'domain', 'category', 'token_bin']))
         for i, dim in enumerate(['language', 'domain', 'category', 'token_bin']):
             with comparison_cols[i]:
-                orig_dist = get_cached_pie_chart_data(df, dim, cache_key)
+                orig_dist = get_cached_pie_chart_data(df, dim, cache_key, data_version)
                 sampled_dist = get_cached_pie_chart_data(sampled_df, dim, get_dataframe_hash(sampled_df))
                 # 计算最大误差
                 max_error = 0
