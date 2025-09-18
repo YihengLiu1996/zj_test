@@ -248,33 +248,32 @@ def sample_dataset(df, weights, target_total):
 
 # ========== 关键改造：带验证的文本获取与导出 ==========
 def export_shards_verified(df, output_path, shard_size_gb=1):
-    """带验证的分片导出（保证100%数据准确性） - 支持分片并行写入 + 内存安全按文件加载"""
+    """带验证的分片导出（保证100%数据准确性） - 支持分片并行写入 + 并发文件读取 + 内存安全"""
     os.makedirs(output_path, exist_ok=True)
     shard_size_bytes = shard_size_gb * GB
     current_size = 0
     shard_idx = 1
     buffer = []
-    shard_data_list = []  # 存储每个分片的数据列表
+    shard_data_list = []
 
-    # 创建进度容器
     progress_container = st.empty()
     status_text = st.sidebar.empty()
 
     total_samples = len(df)
     processed = 0
 
-    # ========== 第一阶段：按文件逐个加载并处理 ==========
+    # ========== 第一阶段：并发按文件加载并处理 ==========
     unique_files = df['file_path'].unique()
     total_files = len(unique_files)
-    file_processed = 0
 
-    # 可选：添加文件处理进度条
+    # 创建文件处理进度条
     file_progress = st.sidebar.progress(0)
     file_status = st.sidebar.empty()
 
-    for file_path in unique_files:
+    # 定义单个文件的处理函数（在线程池中运行）
+    def process_single_file(file_path):
         try:
-            # 1. 一次性读取整个文件内容
+            # 1. 一次性读取整个文件
             with open(file_path, 'rb') as f:
                 content = f.read()
 
@@ -282,19 +281,21 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
             lines = []
             start = 0
             for line_bytes in content.split(b'\n'):
-                if line_bytes:  # 非空行
-                    end = start + len(line_bytes) + 1  # +1 保留 b'\n'
+                if line_bytes:
+                    end = start + len(line_bytes) + 1
                     lines.append((start, line_bytes + b'\n'))
                     start = end
-                else:  # 空行
+                else:
                     lines.append((start, b'\n'))
                     start += 1
 
-            # 3. 构建当前文件的 offset -> line_bytes 映射
+            # 3. 构建 offset -> line_bytes 映射
             offset_to_line = {start_offset: lb for start_offset, lb in lines}
 
-            # 4. 处理该文件下所有样本行
+            # 4. 获取该文件下所有行
             file_df = df[df['file_path'] == file_path]
+            sample_jsons = []  # 存储该文件下所有样本的 json 字符串
+
             for _, row in file_df.iterrows():
                 offset = row['offset']
                 line_bytes = offset_to_line.get(offset)
@@ -302,17 +303,14 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
                 if line_bytes is None:
                     text = f"[ERROR: OFFSET NOT FOUND {offset} IN {file_path}]"
                 else:
-                    # 验证哈希（如果存在）
                     if row.get('line_hash'):
                         actual_hash = hashlib.md5(line_bytes).hexdigest()
                         if actual_hash != row['line_hash']:
                             logger.error(f"数据篡改检测: {file_path}:{offset} | 期望哈希: {row['line_hash']} | 实际: {actual_hash}")
                             text = f"[ERROR: DATA CORRUPTED AT {offset}]"
                         else:
-                            # 解析 JSON
                             try:
                                 data = json.loads(line_bytes.decode('utf-8', errors='replace'))
-                                # 验证 ID（如果存在）
                                 if row.get('id') is not None:
                                     actual_id = data.get('id')
                                     if str(actual_id) != str(row['id']):
@@ -322,7 +320,6 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
                                 logger.error(f"JSON解析失败: {file_path}:{offset}")
                                 text = f"[ERROR: INVALID JSON AT {offset}]"
                     else:
-                        # 无哈希时直接解析
                         try:
                             data = json.loads(line_bytes.decode('utf-8', errors='replace'))
                             if row.get('id') is not None:
@@ -334,7 +331,6 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
                             logger.error(f"JSON解析失败: {file_path}:{offset}")
                             text = f"[ERROR: INVALID JSON AT {offset}]"
 
-                # 创建样本结构
                 sample = {
                     'id': row.get('id'),
                     'source': row['source'],
@@ -345,54 +341,77 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
                     'text': text
                 }
 
-                # 序列化为 JSONL
                 try:
                     sample_json = json.dumps(sample, ensure_ascii=False) + '\n'
-                    sample_bytes = len(sample_json.encode('utf-8'))
+                    sample_jsons.append(sample_json)
                 except Exception as e:
                     logger.error(f"序列化失败: {str(e)} | 样本: {sample}")
                     continue
 
-                # 检查是否需要创建新分片
-                if current_size + sample_bytes > shard_size_bytes and buffer:
-                    shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
-                    shard_data_list.append({
-                        'shard_path': shard_path,
-                        'data_lines': buffer.copy()
-                    })
-                    buffer = []
-                    current_size = 0
-                    shard_idx += 1
-
-                # 添加到缓冲区
-                buffer.append(sample_json)
-                current_size += sample_bytes
-
-                # 更新样本进度（每100条更新一次）
-                processed += 1
-                if processed % 100 == 0:
-                    with progress_container.container():
-                        progress = processed / total_samples
-                        st.progress(min(progress, 1.0))
-                        st.caption(f"分组样本 {processed}/{total_samples} | 当前分片: {shard_idx}")
-                    status_text.text(f"分组进度: {progress:.1%} | 分片: {shard_idx}")
-
-            # 5. 显式清理当前文件相关变量，帮助 GC
-            del offset_to_line, lines, content, file_df
+            return file_path, sample_jsons, len(file_df)  # 返回文件路径、样本列表、处理样本数
 
         except Exception as e:
             logger.error(f"处理文件 {file_path} 时出错: {traceback.format_exc()}")
-            continue  # 跳过错误文件，继续处理其他文件
+            return file_path, [], 0
 
-        # 更新文件处理进度
-        file_processed += 1
-        if total_files > 0:
-            file_progress.progress(file_processed / total_files)
-            file_status.text(f"文件处理: {file_processed}/{total_files} | 样本: {processed}/{total_samples}")
+    # 使用线程池并发处理文件
+    max_workers = min(32, total_files) if total_files > 0 else 1
+    all_sample_jsons = []  # 收集所有样本 json 字符串
 
-    # 清理文件级进度条
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # 提交所有任务
+        future_to_file = {
+            executor.submit(process_single_file, fp): fp for fp in unique_files
+        }
+
+        files_done = 0
+        samples_from_files = 0
+
+        for future in as_completed(future_to_file):
+            file_path, sample_jsons, sample_count = future.result()
+            all_sample_jsons.extend(sample_jsons)
+            samples_from_files += sample_count
+
+            # 更新进度
+            files_done += 1
+            if total_files > 0:
+                file_progress.progress(files_done / total_files)
+                file_status.text(f"文件处理: {files_done}/{total_files} | 样本: {samples_from_files}/{total_samples}")
+
+            if samples_from_files % 100 == 0:
+                with progress_container.container():
+                    progress = samples_from_files / total_samples
+                    st.progress(min(progress, 1.0))
+                    st.caption(f"分组样本 {samples_from_files}/{total_samples} | 当前分片: {shard_idx}")
+                status_text.text(f"分组进度: {progress:.1%} | 分片: {shard_idx}")
+
     file_progress.empty()
     file_status.empty()
+
+    # ========== 第二阶段：按样本列表构建分片（顺序为文件完成顺序，非原始顺序）==========
+    for sample_json in all_sample_jsons:
+        sample_bytes = len(sample_json.encode('utf-8'))
+
+        if current_size + sample_bytes > shard_size_bytes and buffer:
+            shard_path = os.path.join(output_path, f"shard_{shard_idx:04d}.jsonl")
+            shard_data_list.append({
+                'shard_path': shard_path,
+                'data_lines': buffer.copy()
+            })
+            buffer = []
+            current_size = 0
+            shard_idx += 1
+
+        buffer.append(sample_json)
+        current_size += sample_bytes
+
+        processed += 1
+        if processed % 100 == 0:
+            with progress_container.container():
+                progress = processed / total_samples
+                st.progress(min(progress, 1.0))
+                st.caption(f"缓冲样本 {processed}/{total_samples} | 当前分片: {shard_idx}")
+            status_text.text(f"缓冲进度: {progress:.1%} | 分片: {shard_idx}")
 
     # 处理最后一个分片
     if buffer:
@@ -406,18 +425,15 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
     status_text.empty()
     st.sidebar.info(f"数据分组完成！共需创建 {len(shard_data_list)} 个分片")
 
-    # ========== 第二阶段：并行写入分片 ==========
+    # ========== 第三阶段：并行写入分片（保持不变）==========
     if not shard_data_list:
         st.sidebar.warning("无数据可导出")
         return
 
-    # 创建新的进度条用于写入阶段
     write_progress = st.sidebar.progress(0)
     write_status = st.sidebar.empty()
 
-    # 定义单个分片的写入函数
     def write_single_shard(shard_info):
-        """写入单个分片文件"""
         shard_path = shard_info['shard_path']
         data_lines = shard_info['data_lines']
         try:
@@ -429,12 +445,11 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
             logger.error(error_msg)
             return False, shard_path, error_msg
 
-    # 使用线程池并行写入
-    max_workers = min(32, (os.cpu_count() or 1) * 2)
+    max_workers_write = min(32, (os.cpu_count() or 1) * 2)
     success_count = 0
     failed_shards = []
 
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers_write) as executor:
         future_to_shard = {
             executor.submit(write_single_shard, shard_info): shard_info['shard_path']
             for shard_info in shard_data_list
@@ -447,16 +462,13 @@ def export_shards_verified(df, output_path, shard_size_gb=1):
             else:
                 failed_shards.append(error_msg)
 
-            # 更新写入进度
             progress = (i + 1) / len(shard_data_list)
             write_progress.progress(progress)
             write_status.text(f"写入进度: {i+1}/{len(shard_data_list)} | 成功: {success_count}")
 
-    # 清理进度条
     write_progress.empty()
     write_status.empty()
 
-    # 报告最终结果
     if failed_shards:
         st.sidebar.warning(f"导出完成！成功: {success_count}, 失败: {len(failed_shards)}")
         for error in failed_shards[:5]:
