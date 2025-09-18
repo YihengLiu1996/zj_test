@@ -611,32 +611,43 @@ def load_dataset_parallel(data_path):
 st.sidebar.header("🔧 配置面板")
 data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
 
-# 添加路径诊断工具
-if st.sidebar.checkbox("🔍 启用路径诊断", value=False):
-    st.sidebar.subheader("路径诊断")
+# ✅ 改用 expander，不改变组件树结构
+with st.sidebar.expander("🔍 路径诊断", expanded=False):
     abs_path = os.path.abspath(data_path) if data_path else ""
-    st.sidebar.code(f"绝对路径: {abs_path}")
-    if data_path and os.path.exists(data_path):
-        st.sidebar.success("✅ 路径存在")
-        st.sidebar.info(f"包含 {len(os.listdir(data_path))} 个项目")
+    st.code(f"绝对路径: {abs_path}")
+    if not data_path:
+        st.warning("⚠️ 请输入路径后再诊断")
+    elif os.path.exists(data_path):
+        if os.path.isdir(data_path):
+            try:
+                item_count = len(os.listdir(data_path))
+                st.success("✅ 路径存在且可访问")
+                st.info(f"包含 {item_count} 个项目")
+            except PermissionError:
+                st.error("❌ 权限不足，无法列出目录")
+            except Exception as e:
+                st.error(f"⚠️ 未知错误: {str(e)}")
+        else:
+            st.error("❌ 路径存在但不是目录")
     else:
-        st.sidebar.error("❌ 路径不存在或无效")
+        st.error("❌ 路径不存在或无效")
 
-# 加载数据按钮
+# ✅ 按钮现在总是在相同位置，事件绑定稳定
 if st.sidebar.button("📁 加载数据集", type="primary"):
     if not data_path:
         st.sidebar.error("❌ 请先输入路径")
+    elif not os.path.exists(data_path):
+        st.sidebar.error("❌ 路径不存在，请检查")
+    elif not os.path.isdir(data_path):
+        st.sidebar.error("❌ 路径不是有效目录")
     else:
-        # 关键修复：规范化路径（解决Windows大小写问题）
         data_path = os.path.normpath(data_path)
         with st.spinner("🔍 正在扫描数据集文件..."):
             try:
-                # 调用改造后的加载函数
                 result, error = load_dataset_parallel(data_path)
                 if error:
                     st.sidebar.error(f"加载失败: {error}")
                 else:
-                    # 存储到session state
                     st.session_state.df = result['df']
                     st.session_state.total_tokens = result['total_tokens']
                     st.session_state.token_bins = result['token_bins']
@@ -644,7 +655,6 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
 
                     st.sidebar.success(f"🎉 加载成功！共 {len(result['df']):,} 个有效样本，{result['total_tokens']/1e9:.2f}B tokens")
 
-                    # 显示ID统计
                     if 'id' in result['df'] and not pd.isna(result['df']['id']).all():
                         unique_ids = result['df']['id'].nunique()
                         total = len(result['df'])
@@ -653,7 +663,7 @@ if st.sidebar.button("📁 加载数据集", type="primary"):
             except Exception as e:
                 st.sidebar.exception(f"_fatal error_: {str(e)}")
                 st.stop()
-
+                
 # 检查数据是否已加载
 if 'df' in st.session_state:
     df = st.session_state.df
