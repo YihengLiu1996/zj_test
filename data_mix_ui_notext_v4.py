@@ -516,7 +516,7 @@ def load_dataset_parallel(data_path):
     progress_bar.empty()
     status_text.empty()
 
-    if not all_meta:
+    if not all_metadata:
         return None, "未找到有效数据样本"
 
     # 3. 创建元数据DataFrame
