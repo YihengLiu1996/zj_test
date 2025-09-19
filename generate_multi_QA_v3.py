@@ -359,13 +359,13 @@ async def process_data_async(
 
             # 保存中间结果
             write_messages_to_jsonl(
-                os.path.join(args.output_dir, "multiturn_question.jsonl"), 
+                multiturn_question_path, 
                 question_history, 
                 shard_num, 
                 task_type='max_question'
             )
             write_messages_to_jsonl(
-                os.path.join(args.output_dir, "multiturn_filter.jsonl"), 
+                multiturn_filter_path, 
                 filter_history, 
                 shard_num, 
                 task_type='max_filter'
@@ -476,6 +476,10 @@ async def process_data_async(
         print(f"处理数据 {global_idx} 时出错: {str(e)}")
         import traceback
         traceback.print_exc()
+        # ===== 进度更新 =====
+        with progress_lock:
+            if total_pbar:
+                total_pbar.update(1)
 
 ## ================= Worker 协程 ================= ##
 async def worker(
