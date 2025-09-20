@@ -16,6 +16,10 @@ import hashlib
 import logging
 import traceback
 
+# 每次运行都清除所有缓存
+st.cache_data.clear()
+st.cache_resource.clear()
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
