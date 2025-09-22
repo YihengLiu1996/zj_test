@@ -639,6 +639,16 @@ def load_dataset_parallel(data_path):
 # ========== 左侧配置栏 ==========
 
 st.sidebar.header("🔧 配置面板")
+
+# ✅ ========== 新增：强制重启按钮 ========== ✅
+if st.sidebar.button("🔄 强制重启应用", help="清除所有缓存和状态，解决卡死问题"):
+    st.cache_data.clear()
+    st.cache_resource.clear()
+    for key in list(st.session_state.keys()):
+        del st.session_state[key]
+    st.rerun()
+
+
 data_path = st.sidebar.text_input("数据集文件夹路径", value="/path/to/datasets")
 
 # ✅ 改用 expander，不改变组件树结构
