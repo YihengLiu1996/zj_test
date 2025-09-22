@@ -573,39 +573,15 @@ def filter_func(params):
         write_log_file(log_file_path, false_list, latex_false_list, doc_id)
     
     return {"false_list": false_list, "latex_false_list": latex_false_list, "data_json": data_json}
- 
- 
-  
-if __name__ == "__main__":
-    # 设置多进程启动方法为spawn
-    mp.set_start_method('spawn', force=True)
-    
-    # 解析命令行参数
-    parser = argparse.ArgumentParser(description='数据过滤脚本')
-    parser.add_argument('--input_dir', type=str, required=True, help='输入文件夹路径')
-    parser.add_argument('--output_dir', type=str, required=True, help='输出文件夹路径')
-    parser.add_argument('--processes', type=int, default=64, help='使用的进程数量')
-    args = parser.parse_args()
-    
-    input_dir = args.input_dir
-    output_dir = args.output_dir
-    max_workers = args.processes
-    
-    # 创建输出目录和日志目录
-    os.makedirs(output_dir, exist_ok=True)
-    log_dir = os.path.join(output_dir, "log")
-    os.makedirs(log_dir, exist_ok=True)
-    
-    # 获取所有jsonl文件
-    file_list, file_name = tree(input_dir)
-    file_process_list = []
+
+def process_batch_files(file_batch, input_dir, output_dir, log_dir, max_workers):
+    """处理一批文件"""
     data_process_list = []
-    file_mapping = {}  # 存储原始文件路径到输出文件路径的映射
+    file_mapping = {}
     
-    for i, filepath in enumerate(file_list):
+    # 读取批次中的所有文件
+    for filepath in file_batch:
         if os.path.basename(filepath).endswith(".jsonl") and not os.path.basename(filepath).endswith("_F.jsonl"):
-            file_process_list.append(filepath)
-            
             # 计算相对路径并创建对应的输出目录结构
             rel_path = os.path.relpath(filepath, input_dir)
             output_filepath = os.path.join(output_dir, rel_path)
@@ -618,55 +594,44 @@ if __name__ == "__main__":
                 # 添加原始文件路径信息，用于后续保存
                 item['_original_file'] = filepath
                 data_process_list.append(item)
-      
-    print(f"找到 {len(data_process_list)} 个待处理文档，开始并行处理...")
-     
-    # 计算合理的进程数
-    cpu_count = mp.cpu_count()
-    memory_available = psutil.virtual_memory().available
-    model_size = 100 * 1024 * 1024  # 100MB
-     
-    print(f"使用 {max_workers} 个进程进行并行处理 (CPU核心数: {cpu_count}, 可用内存: {memory_available / (1024**3):.2f}GB)")
-     
+    
+    if not data_process_list:
+        return [], {}
+    
+    print(f"当前批次加载 {len(data_process_list)} 个文档，开始并行处理...")
+    
     # 准备任务参数
     task_params = [(data_item, input_dir, output_dir, log_dir) for data_item in data_process_list]
-     
+    
     results = []
-     
-    # 使用进程池，但添加超时和错误处理机制
+    
+    # 使用进程池处理当前批次
     with mp.Pool(
         processes=max_workers,
         initializer=init_process,
         initargs=(fasttext_model_dir,),
-        maxtasksperchild=1000  # 每个子进程最多处理1000个任务后重启，避免资源泄漏
+        maxtasksperchild=1000
     ) as pool:
         try:
-            # 使用imap_unordered，它比imap更高效
             with tqdm(total=len(task_params), desc="文档处理进度", unit="docs") as pbar:
-                # 设置超时时间为10小时
                 timeout = 36000
                 start_time = time.time()
-                 
-                # 分批处理，避免一次性提交太多任务
+                
                 batch_size = 12800
                 for i in range(0, len(task_params), batch_size):
                     batch_params = task_params[i:i+batch_size]
-                     
-                    # 提交批次任务
+                    
                     futures = []
                     for param in batch_params:
                         future = pool.apply_async(filter_func, (param,))
                         futures.append(future)
-                     
-                    # 等待批次任务完成
+                    
                     for j, future in enumerate(futures):
                         try:
-                            # 设置单个任务的超时时间
                             result = future.get(timeout=timeout - (time.time() - start_time))
                             results.append(result)
                         except mp.TimeoutError:
                             print(f"\n任务超时，跳过该任务")
-                            # 添加一个空结果以保持索引一致
                             results.append({
                                 "false_list": [], 
                                 "latex_false_list": [], 
@@ -674,58 +639,106 @@ if __name__ == "__main__":
                             })
                         except Exception as e:
                             print(f"\n任务执行错误: {e}")
-                            # 添加一个空结果以保持索引一致
                             results.append({
                                 "false_list": [], 
                                 "latex_false_list": [], 
                                 "data_json": batch_params[j][0] if j < len(batch_params) else {}
                             })
-                         
+                        
                         pbar.update(1)
-                         
-                        # 检查总超时
+                        
                         if time.time() - start_time > timeout:
                             print(f"\n总处理时间超时，终止处理")
                             break
-                     
-                    # 检查总超时
+                    
                     if time.time() - start_time > timeout:
                         break
-                         
+                        
         except Exception as e:
             print(f"\n进程池执行错误: {e}")
         finally:
-            # 确保进程池正确关闭
             pool.close()
             pool.join()
-     
-    # 按原始文件分组保存结果
-    file_results = {}
-    for result_item in results:
-        data_json = result_item["data_json"]
-        original_file = data_json.get('_original_file', '')
-        if original_file not in file_results:
-            file_results[original_file] = []
-        file_results[original_file].append(data_json)
     
-    # 保存每个文件的结果
-    for original_file, items in file_results.items():
-        if original_file in file_mapping:
-            output_filepath = file_mapping[original_file]
-            with open(output_filepath, 'w', encoding='utf-8') as jsonl_file:
-                for item in items:
-                    # 移除临时添加的字段
-                    if '_original_file' in item:
-                        del item['_original_file']
-                    jsonl_file.write(json.dumps(item, ensure_ascii=False) + '\n')
+    return results, file_mapping
+
+if __name__ == "__main__":
+    # 设置多进程启动方法为spawn
+    mp.set_start_method('spawn', force=True)
+    
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='数据过滤脚本')
+    parser.add_argument('--input_dir', type=str, required=True, help='输入文件夹路径')
+    parser.add_argument('--output_dir', type=str, required=True, help='输出文件夹路径')
+    parser.add_argument('--processes', type=int, default=64, help='使用的进程数量')
+    parser.add_argument('--batch_size', type=int, default=10, help='每次处理的文件数量')
+    args = parser.parse_args()
+    
+    input_dir = args.input_dir
+    output_dir = args.output_dir
+    max_workers = args.processes
+    batch_size = args.batch_size
+    
+    # 创建输出目录和日志目录
+    os.makedirs(output_dir, exist_ok=True)
+    log_dir = os.path.join(output_dir, "log")
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 获取所有jsonl文件
+    file_list, file_name = tree(input_dir)
+    jsonl_files = []
+    for filepath in file_list:
+        if os.path.basename(filepath).endswith(".jsonl") and not os.path.basename(filepath).endswith("_F.jsonl"):
+            jsonl_files.append(filepath)
+    
+    print(f"找到 {len(jsonl_files)} 个待处理的JSONL文件")
+    print(f"将分批处理，每批 {batch_size} 个文件")
+    
+    # 分批处理文件
+    all_results = []
+    total_processed = 0
+    
+    for i in range(0, len(jsonl_files), batch_size):
+        batch_files = jsonl_files[i:i+batch_size]
+        print(f"\n=== 处理第 {i//batch_size + 1} 批文件 ({len(batch_files)} 个文件) ===")
+        
+        # 处理当前批次
+        batch_results, file_mapping = process_batch_files(batch_files, input_dir, output_dir, log_dir, max_workers)
+        
+        # 保存当前批次的结果
+        if batch_results:
+            # 按原始文件分组保存结果
+            file_results = {}
+            for result_item in batch_results:
+                data_json = result_item["data_json"]
+                original_file = data_json.get('_original_file', '')
+                if original_file not in file_results:
+                    file_results[original_file] = []
+                file_results[original_file].append(data_json)
+            
+            # 保存每个文件的结果
+            for original_file, items in file_results.items():
+                if original_file in file_mapping:
+                    output_filepath = file_mapping[original_file]
+                    with open(output_filepath, 'w', encoding='utf-8') as jsonl_file:
+                        for item in items:
+                            # 移除临时添加的字段
+                            if '_original_file' in item:
+                                del item['_original_file']
+                            jsonl_file.write(json.dumps(item, ensure_ascii=False) + '\n')
+            
+            # 累积结果
+            all_results.extend(batch_results)
+            total_processed += len(batch_results)
+            print(f"本批处理完成，累计处理 {total_processed} 个文档")
     
     # 保存汇总的pkl文件
     filter_pkl = os.path.join(output_dir, "zh_en_filter_result.pkl")
     with open(filter_pkl, 'wb') as f:
-        pickle.dump(results, f)
-      
-    print(f"\n处理完成! 保存结果到:")
+        pickle.dump(all_results, f)
+    
+    print(f"\n全部处理完成! 保存结果到:")
     print(f"- 输出目录: {output_dir}")
     print(f"- 日志目录: {log_dir}")
     print(f"- 过滤结果: {filter_pkl}")
-    print(f"共处理 {len(results)} 个文档")
+    print(f"共处理 {len(all_results)} 个文档")
