@@ -6,6 +6,7 @@ from openai import AsyncOpenAI
 import asyncio
 from services.model_config_service import ModelConfigService
 from config import settings
+from typing import List, Dict, Any, Optional, Union
 
 def main():
     """大模型配置页主函数"""
