@@ -6,7 +6,7 @@ import uuid
 from typing import List, Dict, Any, Optional, Union
 from services import file_service
 from config import settings
-from utils import tokenizer_utils, chunk_utils # 我们稍后会创建这些工具模块
+from utils import chunk_utils # 我们稍后会创建这些工具模块
 
 class Dataset:
     """
