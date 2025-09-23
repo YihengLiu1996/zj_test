@@ -67,8 +67,7 @@ class User:
             else:
                 # 如果源文件不存在，创建一个空文件，避免程序报错
                 with open(dst_file, 'w', encoding='utf-8') as f:
-                    f.write(f"# {prompt_filename} - Initial template for user {self.username}
-")
+                    f.write(f"# {prompt_filename} - Initial template for user {self.username}")
 
         # 复制模型配置文件
         src_model_config = os.path.join(settings.INITIAL_DATA_PATH, settings.MODEL_CONFIG_FILE_NAME)
